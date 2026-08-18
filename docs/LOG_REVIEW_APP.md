@@ -32,7 +32,9 @@ log-review
 Equivalently: `python -m logcv.review` or `python -m logcv review`. All forms accept
 `--in <folder>`, `--xlsx <workbook>`, and `--cache <folder>`. If `--in` is omitted,
 the app explains that it will ask for the image folder, opens the folder chooser,
-then offers **Open existing / Create new / Back**. File-dialog cancellation returns
+then offers **Open existing / Create new / Back**. Both workbook browsers start in
+the portable application's `reviews/` directory, which is created automatically.
+File-dialog cancellation returns
 to those choices; backing out shows a welcome screen with **Start review**. After
 the workbook is selected and reconciled, the app asks for the current reviewer.
 Existing workbooks are accepted only when their `review` sheet, required columns,
@@ -314,9 +316,9 @@ that in the ledger with the version and date.
   slow and memory-hungry in a way the TIFFs are not.
 - The viewer is optimized for single-band scanned documents. Non-TIFF images are
   still loaded whole through PIL and do not use the persistent GDAL pyramid.
-- v1.2 through v1.5 workbooks may use `api14`, omit `log_types`, `reviewed_by`,
+- v1.2 through v1.6 workbooks may use `api14`, omit `log_types`, `reviewed_by`,
   or the optional `subset` sheet, and place `file_path` earlier in the schema.
-  They are accepted as legacy input and rewritten to the nine-column v1.6 schema
+  They are accepted as legacy input and rewritten to the current nine-column schema
   on their next successful save without altering untouched review values.
 - The packaged executable is **unsigned**, so Windows SmartScreen shows "Windows
   protected your PC" on first launch on another machine — More info → Run anyway.

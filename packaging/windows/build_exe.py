@@ -40,47 +40,6 @@ EXCLUDES = [
     "notebook", "tifffile", "imagecodecs", "pytesseract", "setuptools", "pip",
 ]
 
-END_USER_README = f"""LogReview {VERSION} - review scanned geophysical logs
-=================================================================
-
-WHAT IT DOES
-    Shows every image in a folder one at a time, lets you zoom around the page,
-    and records stamps, fixed log classifications, and notes in one Excel
-    workbook. Make changes in the workflow panel, then click Add/Update entry.
-
-RUN IT
-    Unzip the complete folder somewhere writable and double-click LogReview.exe.
-    Nothing is installed. On first run, select the folder containing the logs,
-    then choose Open existing or Create new, and enter your reviewer name.
-    Cancelling returns to the preceding choice instead of closing the workflow.
-    Existing workbooks are checked and reconciled before they are opened.
-    Disposable image pyramids are stored under "cache" beside the executable;
-    source images are never modified.
-    LogReview checks public GitHub releases on every application start. If a newer version is
-    available, choose Update now or Later. Verified updates preserve review
-    workbooks and caches, then restart the application.
-
-KEYS
-    Y / N     has a stamp / has no stamp       1..9  choose a stamp type
-    Ctrl+Enter add/update entry                 Space next unreviewed page
-    T / B     top / bottom of page
-    W / F     fit width / whole page
-    wheel     zoom at cursor                    Ctrl+S save now
-    scrollbar / drag / arrows                   move along the page
-
-OUTPUT
-    The workbook records log_api, file link and path, verdict, comma-separated
-    stamp types, checked log types, notes, and the latest review time/reviewer.
-    Blank verdicts have not completed the stamp-review stage.
-
-NOTES
-    Keep the workbook closed in Excel while reviewing; Excel locks open files.
-    If workbook rows and folder files differ, LogReview explains what is missing
-    and can preserve extra rows or remove them after making a timestamped backup.
-    The application is unsigned, so Windows SmartScreen may warn on first run.
-"""
-
-
 def _folder_size_mb(path: str) -> float:
     total = 0
     for dirpath, _, names in os.walk(path):
@@ -177,8 +136,6 @@ def build() -> tuple[str, list[str]]:
 
 
 def prepare_distribution(app_dir: str) -> None:
-    with open(os.path.join(app_dir, "README.txt"), "w", encoding="utf-8") as handle:
-        handle.write(END_USER_README)
     os.makedirs(os.path.join(app_dir, "reviews"), exist_ok=True)
     os.makedirs(os.path.join(app_dir, "cache"), exist_ok=True)
 
@@ -203,7 +160,7 @@ def package() -> tuple[str, str]:
     base = os.path.join(OUTPUTS, f"{APP_NAME}_v{VERSION}_windows_x64")
     if os.path.exists(base + ".zip"):
         os.remove(base + ".zip")
-    print("zipping…")
+    print("zipping...")
     archive = shutil.make_archive(base, "zip", root_dir=DIST, base_dir=APP_NAME)
     digest = hashlib.sha256()
     with open(archive, "rb") as handle:

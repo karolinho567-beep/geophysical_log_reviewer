@@ -614,6 +614,7 @@ def test_a_packaged_build_asks_for_a_folder_and_saves_beside_itself(tmp_path, mo
     book = review_app._default_workbook(r"D:\scans\Victoria_TIFs")
     assert book == str(tmp_path / "LogReview" / "reviews"
                        / "Victoria_TIFs_stamp_review.xlsx")
+    assert review_app._default_reviews_dir() == str(tmp_path / "LogReview" / "reviews")
     assert review_app._default_cache_dir() == str(tmp_path / "LogReview" / "cache")
 
 
@@ -626,6 +627,7 @@ def test_source_build_asks_for_a_folder_and_uses_a_local_reviews_folder(tmp_path
     assert review_app._default_folder() is None
     book = review_app._default_workbook(r"D:\scans\Victoria_TIFs")
     assert book == str(tmp_path / "reviews" / "Victoria_TIFs_stamp_review.xlsx")
+    assert review_app._default_reviews_dir() == str(tmp_path / "reviews")
     assert review_app._default_cache_dir() == str(tmp_path / "cache")
 
 

@@ -651,6 +651,14 @@ class ReviewApp(tk.Tk):
     def _choose_workbook(self, folder: str, images: list[str]) -> bool:
         """Recoverable Existing/New/Back workflow; file-dialog cancel loops here."""
         default = _default_workbook(folder)
+        default_dir = os.path.dirname(default)
+        try:
+            os.makedirs(default_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Cannot prepare review folder", f"{default_dir}\n\n{exc}", parent=self
+            )
+            return False
         while True:
             action = self._ask_workbook_action()
             if action == "back":
@@ -661,7 +669,7 @@ class ReviewApp(tk.Tk):
                 path = filedialog.askopenfilename(
                     title="Open an existing LogReview workbook",
                     filetypes=[("Excel workbook", "*.xlsx")],
-                    initialdir=os.path.dirname(default),
+                    initialdir=default_dir,
                     parent=self,
                 )
                 if not path:
@@ -682,7 +690,7 @@ class ReviewApp(tk.Tk):
                     title="Create a new LogReview workbook",
                     defaultextension=".xlsx",
                     filetypes=[("Excel workbook", "*.xlsx")],
-                    initialdir=os.path.dirname(default),
+                    initialdir=default_dir,
                     initialfile=os.path.basename(default),
                     confirmoverwrite=False,
                     parent=self,
@@ -1837,7 +1845,7 @@ class ReviewApp(tk.Tk):
                 )
             return
         self._update_check_running = True
-        self.update_button.configure(state="disabled", text="Checkingâ€¦")
+        self.update_button.configure(state="disabled", text="Checking...")
 
         def check() -> None:
             release = None
@@ -1900,7 +1908,7 @@ class ReviewApp(tk.Tk):
         body.pack(fill="both", expand=True)
         ttk.Label(
             body,
-            text=f"Downloading and verifying LogReview {release.version}â€¦",
+            text=f"Downloading and verifying LogReview {release.version}...",
         ).pack(anchor="w", pady=(0, 12))
         progress = ttk.Progressbar(body, mode="indeterminate", length=440)
         progress.pack(fill="x")
@@ -2034,8 +2042,13 @@ def _default_workbook(folder: str) -> str:
     """Where verdicts go by default. Never beside the images -- `data/raw/` is
     read-only, and a packaged copy may be pointed at a read-only share."""
     base = os.path.basename(os.path.normpath(folder)) or "logs"
+    return os.path.join(_default_reviews_dir(), f"{base}_stamp_review.xlsx")
+
+
+def _default_reviews_dir() -> str:
+    """Default workbook directory beside the portable app or source launch."""
     root = os.path.dirname(sys.executable) if _frozen() else os.getcwd()
-    return os.path.join(root, "reviews", f"{base}_stamp_review.xlsx")
+    return os.path.join(root, "reviews")
 
 
 def _default_cache_dir() -> str:
@@ -2323,15 +2336,20 @@ def selftest(folder: str | None = None) -> int:
             original_action = app._ask_workbook_action
             original_openfilename = filedialog.askopenfilename
             original_savefilename = filedialog.asksaveasfilename
+            workbook_browser_dirs = []
             try:
                 actions = iter(("existing", "back"))
                 app._ask_workbook_action = lambda: next(actions)
-                filedialog.askopenfilename = lambda **_kwargs: ""
+                filedialog.askopenfilename = lambda **kwargs: (
+                    workbook_browser_dirs.append(kwargs.get("initialdir")) or ""
+                )
                 existing_cancelled = not app._choose_workbook(app.folder, app.paths)
 
                 actions = iter(("new", "back"))
                 app._ask_workbook_action = lambda: next(actions)
-                filedialog.asksaveasfilename = lambda **_kwargs: ""
+                filedialog.asksaveasfilename = lambda **kwargs: (
+                    workbook_browser_dirs.append(kwargs.get("initialdir")) or ""
+                )
                 new_cancelled = not app._choose_workbook(app.folder, app.paths)
             finally:
                 app._ask_workbook_action = original_action
@@ -2339,6 +2357,13 @@ def selftest(folder: str | None = None) -> int:
                 filedialog.asksaveasfilename = original_savefilename
             check("existing workbook cancel returns to choices", existing_cancelled)
             check("new workbook cancel returns to choices", new_cancelled)
+            expected_reviews = _default_reviews_dir()
+            check(
+                "workbook browsers default to reviews folder",
+                workbook_browser_dirs == [expected_reviews, expected_reviews]
+                and os.path.isdir(expected_reviews),
+                expected_reviews,
+            )
 
             original_askstring = simpledialog.askstring
             simpledialog.askstring = lambda *_args, **_kwargs: None
