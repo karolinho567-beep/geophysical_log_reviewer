@@ -1,0 +1,29 @@
+name: victoria-cv-logs
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pandas
+  - geopandas
+  - pyproj
+  - shapely
+  - gdal              # windowed reads of the very tall Group 4 TIFFs
+  - matplotlib
+  - contextily
+  - requests
+  - openpyxl          # the review workbook, with images embedded in cells
+  - pillow            # all QC rendering (NOT matplotlib - see docs/CV_TOOL_DESIGN.md)
+  - numpy
+  - scipy             # ndimage: O(1) morphology, the Hough accumulator
+  - scikit-image
+  - opencv
+  - tifffile
+  - imagecodecs
+  - pyyaml
+  - pytest
+  - tesseract         # optional: OCR of the stamp's inner text (not needed for v1)
+  - pytesseract
+  - pip
+  - pip:
+    - pip-system-certs
+    - -e .

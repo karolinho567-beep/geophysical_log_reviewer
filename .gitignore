@@ -1,0 +1,47 @@
+# Reviewer inputs and user-created review data
+/data/
+/reviews/
+/cache/
+*.tif
+*.tiff
+*.xlsx
+~$*
+
+# Project-specific analysis material (not part of the reusable product)
+/gis/
+/tasks/
+/deliverables/
+/templates/
+/PROJECT_STATUS.md
+/docs/GROUNDWATER_PIPELINE_RUNBOOK.md
+
+# Standalone application builds and installers
+/build/
+/dist/
+*.exe
+*.zip
+
+# Python environments and generated metadata
+.env
+.venv/
+venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Credentials and signing material must never enter the repository
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

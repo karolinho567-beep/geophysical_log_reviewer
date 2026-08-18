@@ -1,0 +1,208 @@
+r"""Build and verify the standalone Windows LogReview distribution.
+
+Run from the project root in the dedicated ``logreview-build`` environment:
+
+    python packaging\windows\build_exe.py
+
+Generated artifacts go to ``dist/windows`` and disposable PyInstaller work goes
+to ``build/windows``. A ZIP is created only after the packaged executable passes
+its end-to-end self-test.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+SRC = os.path.join(ROOT, "src")
+OUTPUTS = os.path.join(ROOT, "dist", "windows")
+DIST = OUTPUTS
+WORK = os.path.join(ROOT, "build", "windows")
+ENTRY = os.path.join(HERE, "entry.py")
+APP_NAME = "LogReview"
+SAMPLE_LOGS = os.path.join(ROOT, "data", "raw", "Digitization_TIF_FINAL")
+
+with open(os.path.join(ROOT, "pyproject.toml"), "rb") as handle:
+    VERSION = tomllib.load(handle)["project"]["version"]
+
+# Large libraries carried by the broader project environment but never imported
+# by the review product. The build environment should still be kept minimal.
+EXCLUDES = [
+    "scipy", "cv2", "skimage", "sklearn", "matplotlib", "pandas", "geopandas",
+    "shapely", "pyproj", "fiona", "contextily", "pytest", "IPython",
+    "notebook", "tifffile", "imagecodecs", "pytesseract", "setuptools", "pip",
+]
+
+END_USER_README = f"""LogReview {VERSION} - review scanned geophysical logs
+=================================================================
+
+WHAT IT DOES
+    Shows every image in a folder one at a time, lets you zoom around the page,
+    and records stamps, fixed log classifications, and notes in one Excel
+    workbook. Make changes in the workflow panel, then click Add/Update entry.
+
+RUN IT
+    Unzip the complete folder somewhere writable and double-click LogReview.exe.
+    Nothing is installed. On first run, select the folder containing the logs,
+    then choose Open existing or Create new, and enter your reviewer name.
+    Cancelling returns to the preceding choice instead of closing the workflow.
+    Existing workbooks are checked and reconciled before they are opened.
+    Disposable image pyramids are stored under "cache" beside the executable;
+    source images are never modified.
+
+KEYS
+    Y / N     has a stamp / has no stamp       1..9  choose a stamp type
+    Ctrl+Enter add/update entry                 Space next unreviewed page
+    T / B     top / bottom of page
+    W / F     fit width / whole page
+    wheel     zoom at cursor                    Ctrl+S save now
+    scrollbar / drag / arrows                   move along the page
+
+OUTPUT
+    The workbook records log_api, file link and path, verdict, comma-separated
+    stamp types, checked log types, notes, and the latest review time/reviewer.
+    Blank verdicts have not completed the stamp-review stage.
+
+NOTES
+    Keep the workbook closed in Excel while reviewing; Excel locks open files.
+    If workbook rows and folder files differ, LogReview explains what is missing
+    and can preserve extra rows or remove them after making a timestamped backup.
+    The application is unsigned, so Windows SmartScreen may warn on first run.
+"""
+
+
+def _folder_size_mb(path: str) -> float:
+    total = 0
+    for dirpath, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total / 1e6
+
+
+def _rmtree_retry(path: str, attempts: int = 8) -> None:
+    """Remove build scratch while tolerating antivirus briefly holding DLLs."""
+    for attempt in range(attempts):
+        if not os.path.isdir(path):
+            return
+        try:
+            shutil.rmtree(path)
+            return
+        except (PermissionError, OSError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(1.5)
+
+
+def build() -> tuple[str, list[str]]:
+    app_dir = os.path.join(DIST, APP_NAME)
+    for folder in (app_dir, WORK):
+        _rmtree_retry(folder)
+    os.makedirs(OUTPUTS, exist_ok=True)
+
+    args = [
+        sys.executable, "-m", "PyInstaller", ENTRY,
+        "--name", APP_NAME,
+        "--noconfirm", "--clean", "--onedir", "--windowed",
+        "--paths", SRC,
+        "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
+        "--collect-submodules", "osgeo",
+        "--collect-data", "osgeo",
+        "--collect-data", "openpyxl",
+        "--add-data", os.path.join(SRC, "logcv", "review", "log_types.json")
+                      + os.pathsep + os.path.join("logcv", "review"),
+        "--hidden-import", "PIL._tkinter_finder",
+    ]
+    for module in EXCLUDES:
+        args += ["--exclude-module", module]
+
+    print("$ " + " ".join(args[1:]))
+    started = time.time()
+    env = os.environ.copy()
+    if os.name == "nt":
+        # Invoking <env>/python.exe directly does not activate Conda, so its DLL
+        # directories are absent from PATH. PyInstaller then sees osgeo/Pillow's
+        # extension modules but cannot discover gdal.dll and their image codecs.
+        conda_dll_dirs = [
+            os.path.join(sys.prefix, "Library", "bin"),
+            os.path.join(sys.prefix, "DLLs"),
+            sys.prefix,
+        ]
+        env["PATH"] = os.pathsep.join(conda_dll_dirs + [env.get("PATH", "")])
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, env=env)
+    print(f"PyInstaller finished in {time.time() - started:.0f} s "
+          f"(exit {result.returncode})")
+    warnings = [line for line in result.stderr.splitlines()
+                if "WARNING" in line or "ERROR" in line]
+    if result.returncode != 0:
+        print(result.stdout[-4000:])
+        print(result.stderr[-4000:])
+        raise SystemExit("PyInstaller failed")
+    return app_dir, warnings
+
+
+def prepare_distribution(app_dir: str) -> None:
+    with open(os.path.join(app_dir, "README.txt"), "w", encoding="utf-8") as handle:
+        handle.write(END_USER_README)
+    os.makedirs(os.path.join(app_dir, "reviews"), exist_ok=True)
+    os.makedirs(os.path.join(app_dir, "cache"), exist_ok=True)
+
+
+def verify(app_dir: str) -> tuple[bool, str]:
+    exe = os.path.join(app_dir, f"{APP_NAME}.exe")
+    report = os.path.join(OUTPUTS, "selftest_report.txt")
+    cmd = [exe, "--selftest", "--report", report]
+    if os.path.isdir(SAMPLE_LOGS):
+        cmd += ["--in", SAMPLE_LOGS]
+    print("$ " + " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    text = ""
+    if os.path.exists(report):
+        with open(report, encoding="utf-8") as handle:
+            text = handle.read()
+    print(text or result.stdout or result.stderr)
+    return result.returncode == 0, text
+
+
+def package() -> str:
+    stamp = time.strftime("%Y%m%d")
+    base = os.path.join(OUTPUTS, f"{APP_NAME}_v{VERSION}_{stamp}")
+    if os.path.exists(base + ".zip"):
+        os.remove(base + ".zip")
+    print("zipping…")
+    return shutil.make_archive(base, "zip", root_dir=DIST, base_dir=APP_NAME)
+
+
+def main() -> int:
+    app_dir, warnings = build()
+    prepare_distribution(app_dir)
+    ok, selftest_report = verify(app_dir)
+    zipped = package() if ok else "NOT CREATED"
+
+    lines = [
+        f"LogReview v{VERSION} build report - {time.strftime('%Y-%m-%d %H:%M')}",
+        f"  app folder : {app_dir}  ({_folder_size_mb(app_dir):.0f} MB)",
+        f"  zip        : {zipped}",
+        f"  selftest   : {'PASS' if ok else 'FAIL'}",
+        "",
+        selftest_report,
+        "",
+        f"PyInstaller warnings ({len(warnings)}):",
+        *[f"  {line}" for line in warnings[:40]],
+    ]
+    text = "\n".join(lines)
+    with open(os.path.join(OUTPUTS, "build_report.txt"), "w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+    print("\n" + text)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

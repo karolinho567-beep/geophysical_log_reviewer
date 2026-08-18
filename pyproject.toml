@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logcv"
+version = "1.4.0"
+description = "Computer-vision and human-review tools for scanned geophysical logs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "GDAL",
+    "numpy",
+    "openpyxl",
+    "Pillow",
+    "scipy",
+]
+
+[project.scripts]
+logcv = "logcv.cli:main"
+log-review = "logcv.review.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+logcv = ["templates/*.npz"]
+"logcv.review" = ["log_types.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
