@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.6.1**
+Current version: **1.6.2**
 
 ## Features
 

@@ -162,8 +162,8 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    file containing one API per line, review the match summary, and create or
    replace the workbook's `subset` sheet. Use **whole dataset** and **subset**
    above the log list to switch scopes. One API includes every TIFF whose name
-   begins with that API. Unmatched valid APIs remain in the subset sheet and are
-   reported; malformed lines stop the import without changing the existing subset.
+   begins with that API. Unmatched valid APIs are reported but are not added;
+   malformed lines stop the import without changing the existing subset.
 7. **When the sweep is complete**, compare it against the detector's
    `stamp_inventory.csv` (join its `api14` to `log_api`) and promote as described in
    [Outputs](#outputs).
@@ -267,10 +267,14 @@ near-instant afterward.
 
   Header is frozen and auto-filtered. The sheet is **rewritten in full on every
   save**, so the file on disk is always the complete current answer.
-- Optional sheet `subset`, with columns `position` and `log_api`, stores the
-  ordered requested API membership. It never duplicates verdicts or notes; both
-  viewer scopes edit the same rows in `review`. Saving from subset mode still
-  writes every current-folder review row and preserves retained out-of-folder rows.
+- Optional sheet `subset` uses the exact same nine columns as `review` and contains
+  one complete row for every selected TIFF. It is a synchronized mirror: both
+  viewer scopes edit the canonical records in `review`, and every successful save
+  regenerates the subset rows with current verdicts, stamp types, log types, notes,
+  timestamps, reviewer values, hyperlinks, and file paths. Saving from subset mode
+  still writes every current-folder review row and preserves retained out-of-folder
+  rows. The older v1.6/v1.6.1 `position` / `log_api` subset sheet is accepted and
+  upgraded on the next successful save.
 - `stamp_types.json` beside the workbook — the type list, as above.
 - Bundled `log_types.json` — fixed choices maintained with the application.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and

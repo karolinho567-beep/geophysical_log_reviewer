@@ -304,14 +304,27 @@ def test_save_preserves_workbook_only_rows_after_current_folder_rows(tmp_path):
     assert reloaded.counts(["current.tif"]) == (1, 0, 0)
 
 
-def test_subset_membership_round_trips_in_a_separate_sheet(tmp_path):
+def test_subset_sheet_mirrors_full_review_rows_and_values(tmp_path):
     from openpyxl import load_workbook
 
     book = tmp_path / "review.xlsx"
     store = ReviewStore(str(book))
-    store.record_for(str(tmp_path / "42175000720000-a.tif"))
-    store.record_for(str(tmp_path / "42175000720000-b.tif"))
-    store.record_for(str(tmp_path / "42175001200000-c.tif"))
+    first = store.record_for(
+        str(tmp_path / "42175000720000-a.tif"), "42175000720000"
+    )
+    first.set_verdict(True, "IHS")
+    first.log_types = "Gamma Ray"
+    first.notes = "first subset note"
+    first.reviewed_by = "KP"
+    store.record_for(
+        str(tmp_path / "42175000720000-b.tif"), "42175000720000"
+    ).notes = "second page"
+    store.record_for(
+        str(tmp_path / "42175001200000-c.tif"), "42175001200000"
+    ).set_verdict(False)
+    store.record_for(
+        str(tmp_path / "42175009990000-not-selected.tif"), "42175009990000"
+    ).set_verdict(False)
     store.replace_subset([
         "42175001200000", "42175000720000", "42175001200000", "42175999999999",
     ])
@@ -321,15 +334,46 @@ def test_subset_membership_round_trips_in_a_separate_sheet(tmp_path):
     assert SUBSET_SHEET in workbook.sheetnames
     subset = workbook[SUBSET_SHEET]
     assert [cell.value for cell in subset[1]] == SUBSET_COLUMNS
+    assert SUBSET_COLUMNS == COLUMNS
     assert [subset.cell(row=i, column=2).value for i in range(2, 5)] == [
-        "42175001200000", "42175000720000", "42175999999999",
+        "42175000720000-a.tif", "42175000720000-b.tif", "42175001200000-c.tif",
     ]
+    assert subset.cell(row=2, column=3).value is True
+    assert subset.cell(row=2, column=4).value == "IHS"
+    assert subset.cell(row=2, column=5).value == "Gamma Ray"
+    assert subset.cell(row=2, column=6).value == "first subset note"
+    assert subset.cell(row=2, column=8).value == "KP"
+    assert subset.cell(row=2, column=2).hyperlink.target.endswith(
+        "42175000720000-a.tif"
+    )
+    assert subset.cell(row=2, column=9).value.endswith("42175000720000-a.tif")
 
     reloaded = ReviewStore(str(book))
     reloaded.load()
-    assert reloaded.subset_apis == [
-        "42175001200000", "42175000720000", "42175999999999",
-    ]
+    assert reloaded.subset_apis == ["42175000720000", "42175001200000"]
+
+
+def test_v16_membership_only_subset_migrates_to_full_rows(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.record_for(
+        str(tmp_path / "42175000720000-a.tif"), "42175000720000"
+    ).set_verdict(True, "IHS")
+    store.save(order=list(store.records))
+
+    workbook = load_workbook(book)
+    legacy = workbook.create_sheet(SUBSET_SHEET)
+    legacy.append(["position", "log_api"])
+    legacy.append([1, "42175000720000"])
+    workbook.save(book)
+
+    migrated = ReviewStore(str(book))
+    migrated.load()
+    assert migrated.subset_apis == ["42175000720000"]
+    migrated.save(order=list(migrated.records))
+    assert [cell.value for cell in load_workbook(book)[SUBSET_SHEET][1]] == COLUMNS
 
 
 def test_legacy_workbook_without_subset_loads_with_no_membership(tmp_path):
@@ -356,7 +400,7 @@ def test_malformed_subset_sheet_is_rejected(tmp_path):
     subset.append([1, "42175000720000"])
     workbook.save(book)
 
-    with pytest.raises(InvalidWorkbook, match="subset worksheet is missing"):
+    with pytest.raises(InvalidWorkbook, match="same columns and order"):
         validate_review_workbook(str(book), {"a.tif"})
 
 

@@ -26,9 +26,8 @@ from openpyxl.utils import get_column_letter
 
 #: Sheet the review rows live on.
 SHEET = "review"
-#: Optional sheet containing the ordered API membership for subset mode.
+#: Optional sheet mirroring the selected review rows for subset mode.
 SUBSET_SHEET = "subset"
-SUBSET_COLUMNS = ["position", "log_api"]
 #: Review header row, in order.
 COLUMNS = [
     "log_api",        # 14-digit API parsed from the file name
@@ -41,6 +40,8 @@ COLUMNS = [
     "reviewed_by",    # reviewer responsible for the latest committed edit
     "file_path",      # same target as file_link, readable by pandas
 ]
+SUBSET_COLUMNS = list(COLUMNS)
+LEGACY_SUBSET_COLUMNS = ["position", "log_api"]
 #: Required in all supported schemas. ``api14`` is accepted as the legacy alias
 #: for ``log_api``; ``log_types`` and ``reviewed_by`` were added later.
 REQUIRED_COLUMNS = [
@@ -173,7 +174,7 @@ def _parse_bool(value) -> bool | None:
 
 
 def _read_subset_apis(sheet) -> list[str]:
-    """Read and validate the app-owned API subset worksheet."""
+    """Read subset membership from the full mirror or v1.6 legacy schema."""
     rows = sheet.iter_rows(values_only=True)
     try:
         first = next(rows)
@@ -183,11 +184,43 @@ def _read_subset_apis(sheet) -> list[str]:
         str(value).strip().lower(): i
         for i, value in enumerate(first) if value is not None
     }
-    missing = [name for name in SUBSET_COLUMNS if name not in header]
-    if missing:
+    if all(name in header for name in LEGACY_SUBSET_COLUMNS):
+        return _read_legacy_subset_apis(rows, header)
+
+    actual = [str(value).strip().lower() for value in first if value is not None]
+    if actual != SUBSET_COLUMNS:
         raise InvalidWorkbook(
-            "The subset worksheet is missing columns: " + ", ".join(missing)
+            "The subset worksheet must use the same columns and order as the review "
+            "worksheet."
         )
+    apis: list[str] = []
+    seen_apis: set[str] = set()
+    seen_names: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        api = str(row[header["log_api"]] or "").strip()
+        name = str(row[header["file_link"]] or "").strip()
+        if not api and not name and not any(value not in (None, "") for value in row):
+            continue
+        if len(api) != 14 or not api.isdigit():
+            raise InvalidWorkbook(
+                f"Subset row {row_number} must contain a 14-digit log_api."
+            )
+        if not name:
+            raise InvalidWorkbook(f"Subset row {row_number} has no file_link value.")
+        name_key = name.casefold()
+        if name_key in seen_names:
+            raise InvalidWorkbook(
+                f"Subset row {row_number} duplicates file name {name!r}."
+            )
+        seen_names.add(name_key)
+        if api not in seen_apis:
+            apis.append(api)
+            seen_apis.add(api)
+    return apis
+
+
+def _read_legacy_subset_apis(rows, header: dict[str, int]) -> list[str]:
+    """Read the v1.6/v1.6.1 position/log_api membership-only sheet."""
     positioned: list[tuple[int, str]] = []
     seen_positions: set[int] = set()
     seen_apis: set[str] = set()
@@ -465,52 +498,53 @@ class ReviewStore:
 
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill("solid", fgColor="44546A")
-        for col, name in enumerate(COLUMNS, start=1):
-            cell = sheet.cell(row=1, column=col, value=name)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = Alignment(horizontal="center")
-
         link_font = Font(color="0563C1", underline="single")
-        for row_i, name in enumerate(names, start=2):
-            record = self.records.get(name)
-            if record is None:
-                continue
-            sheet.cell(row=row_i, column=1, value=record.api14 or None)
-            link = sheet.cell(row=row_i, column=2, value=record.file_name)
-            if record.file_path:
-                link.hyperlink = record.file_path
-                link.font = link_font
-            sheet.cell(row=row_i, column=3, value=record.has_stamp)
-            sheet.cell(row=row_i, column=4, value=record.stamp_type or None)
-            sheet.cell(row=row_i, column=5, value=record.log_types or None)
-            sheet.cell(row=row_i, column=6, value=record.notes or None)
-            sheet.cell(row=row_i, column=7, value=record.reviewed_at or None)
-            sheet.cell(row=row_i, column=8, value=record.reviewed_by or None)
-            sheet.cell(row=row_i, column=9, value=record.file_path or None)
-
         widths = [16, 46, 11, 24, 28, 40, 20, 16, 70]
-        for col, width in enumerate(widths, start=1):
-            sheet.column_dimensions[get_column_letter(col)].width = width
-        sheet.freeze_panes = "A2"
-        last = max(2, len(names) + 1)
-        sheet.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{last}"
 
-        if self.subset_apis:
-            subset = book.create_sheet(SUBSET_SHEET)
-            for col, name in enumerate(SUBSET_COLUMNS, start=1):
-                cell = subset.cell(row=1, column=col, value=name)
+        def write_record_sheet(target, record_names: list[str]) -> None:
+            for col, column_name in enumerate(COLUMNS, start=1):
+                cell = target.cell(row=1, column=col, value=column_name)
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = Alignment(horizontal="center")
-            for position, api in enumerate(self.subset_apis, start=1):
-                subset.cell(row=position + 1, column=1, value=position)
-                api_cell = subset.cell(row=position + 1, column=2, value=api)
+            written = 0
+            for name in record_names:
+                record = self.records.get(name)
+                if record is None:
+                    continue
+                written += 1
+                row_i = written + 1
+                api_cell = target.cell(row=row_i, column=1, value=record.api14 or None)
                 api_cell.number_format = "@"
-            subset.column_dimensions["A"].width = 10
-            subset.column_dimensions["B"].width = 18
-            subset.freeze_panes = "A2"
-            subset.auto_filter.ref = f"A1:B{len(self.subset_apis) + 1}"
+                link = target.cell(row=row_i, column=2, value=record.file_name)
+                if record.file_path:
+                    link.hyperlink = record.file_path
+                    link.font = link_font
+                target.cell(row=row_i, column=3, value=record.has_stamp)
+                target.cell(row=row_i, column=4, value=record.stamp_type or None)
+                target.cell(row=row_i, column=5, value=record.log_types or None)
+                target.cell(row=row_i, column=6, value=record.notes or None)
+                target.cell(row=row_i, column=7, value=record.reviewed_at or None)
+                target.cell(row=row_i, column=8, value=record.reviewed_by or None)
+                target.cell(row=row_i, column=9, value=record.file_path or None)
+            for col, width in enumerate(widths, start=1):
+                target.column_dimensions[get_column_letter(col)].width = width
+            target.freeze_panes = "A2"
+            last = max(2, written + 1)
+            target.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{last}"
+
+        write_record_sheet(sheet, names)
+
+        if self.subset_apis:
+            subset = book.create_sheet(SUBSET_SHEET)
+            subset_source = list(order) if order else names
+            wanted = set(self.subset_apis)
+            subset_names = [
+                name for name in subset_source
+                if (self.records.get(name) is not None
+                    and self.records[name].api14 in wanted)
+            ]
+            write_record_sheet(subset, subset_names)
 
         folder = os.path.dirname(self.path)
         if folder:

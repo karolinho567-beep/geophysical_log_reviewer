@@ -43,6 +43,7 @@ from logcv import __version__
 
 from . import pages
 from .store import (
+    COLUMNS,
     InvalidWorkbook,
     ReviewStore,
     WorkbookInspection,
@@ -1054,7 +1055,7 @@ class ReviewApp(tk.Tk):
             f"Requested APIs: {len(requested)}\n"
             f"Matched APIs: {len(matched_apis)}\n"
             f"Matched TIFFs: {len(matched_paths)}\n"
-            f"Unmatched APIs retained in the subset sheet: {len(unmatched)}\n"
+            f"Unmatched APIs not included in the subset: {len(unmatched)}\n"
             f"Duplicate lines ignored: {duplicates}"
         )
         if unmatched:
@@ -2312,16 +2313,24 @@ def selftest(folder: str | None = None) -> int:
                 app._switch_scope("all")
                 subset_reload = ReviewStore(book)
                 subset_rows = subset_reload.load()
+                from openpyxl import load_workbook
+                subset_book = load_workbook(book, data_only=True)
+                subset_sheet = subset_book["subset"]
+                subset_header = [cell.value for cell in subset_sheet[1]]
+                subset_first = [cell.value for cell in subset_sheet[2]]
+                subset_book.close()
                 check(
-                    "subset sheet and scope preserve the full review",
+                    "subset sheet mirrors full review columns and values",
                     subset_saved and subset_opened and subset_count >= 1
                     and subset_rows == len(app.all_paths)
-                    and subset_reload.subset_apis
-                    == [leading_apis[0], "99999999999999"],
+                    and subset_reload.subset_apis == [leading_apis[0]]
+                    and subset_header == COLUMNS
+                    and subset_first[2] is True
+                    and subset_first[4] == "Gamma Ray, Spontaneous Potential",
                     f"{subset_count} subset / {subset_rows} workbook rows",
                 )
             else:
-                check("subset sheet and scope preserve the full review", False,
+                check("subset sheet mirrors full review columns and values", False,
                       "no leading API in self-test TIFF names")
             try:
                 validate_review_workbook(
