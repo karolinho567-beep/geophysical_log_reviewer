@@ -29,6 +29,8 @@ from logcv.review.store import (
     InvalidWorkbook,
     Record,
     ReviewStore,
+    SUBSET_COLUMNS,
+    SUBSET_SHEET,
     WorkbookLocked,
     join_values,
     load_log_types,
@@ -77,7 +79,7 @@ def test_workbook_round_trip_preserves_the_verdicts(tmp_path):
     yes = store.record_for(str(tmp_path / "42175000720000_1.TIF"), "42175000720000")
     yes.set_verdict(True, "IHS")
     yes.stamp_type = "IHS, TWDB"
-    yes.log_types = "Gamma, Spontaneous Potential"
+    yes.log_types = "Gamma Ray, Spontaneous Potential"
     yes.notes = "two stamps, one at the tail"
     yes.reviewed_by = "KP"
     no = store.record_for(str(tmp_path / "42175001200000_2.TIF"), "42175001200000")
@@ -90,7 +92,7 @@ def test_workbook_round_trip_preserves_the_verdicts(tmp_path):
     again = reloaded.records["42175000720000_1.TIF"]
     assert again.has_stamp is True
     assert again.stamp_type == "IHS, TWDB"
-    assert again.log_types == "Gamma, Spontaneous Potential"
+    assert again.log_types == "Gamma Ray, Spontaneous Potential"
     assert again.notes == "two stamps, one at the tail"
     assert again.api14 == "42175000720000"
     assert again.reviewed_by == "KP"
@@ -99,7 +101,7 @@ def test_workbook_round_trip_preserves_the_verdicts(tmp_path):
     assert reloaded.counts() == (2, 1, 0)
 
 
-def test_saved_sheet_has_the_exact_v14_column_order(tmp_path):
+def test_saved_sheet_has_the_exact_v16_column_order(tmp_path):
     from openpyxl import load_workbook
 
     book = tmp_path / "stamp_review.xlsx"
@@ -111,12 +113,13 @@ def test_saved_sheet_has_the_exact_v14_column_order(tmp_path):
     header = [cell.value for cell in sheet[1]]
     assert header == COLUMNS
     assert header == [
-        "log_api", "file_link", "file_path", "has_stamp", "type_of_stamp",
-        "log_types", "notes", "reviewed_at", "reviewed_by",
+        "log_api", "file_link", "has_stamp", "type_of_stamp", "log_types",
+        "notes", "reviewed_at", "reviewed_by", "file_path",
     ]
     assert sheet.cell(row=2, column=2).value == "a.tif"
     assert sheet.cell(row=2, column=2).hyperlink.target.endswith("a.tif")
-    assert sheet.cell(row=2, column=4).value is True  # a real Excel boolean
+    assert sheet.cell(row=2, column=3).value is True  # a real Excel boolean
+    assert sheet.cell(row=2, column=9).value.endswith("a.tif")
 
 
 @pytest.mark.parametrize(
@@ -132,8 +135,8 @@ def test_has_stamp_is_coerced_from_whatever_excel_returns(tmp_path, written, exp
     sheet = wb.active
     sheet.title = "review"
     sheet.append(COLUMNS)
-    sheet.append(["", "a.tif", str(tmp_path / "a.tif"), written,
-                  "IHS", "", "", "", ""])
+    sheet.append(["", "a.tif", written, "IHS", "", "", "", "",
+                  str(tmp_path / "a.tif")])
     wb.save(book)
 
     store = ReviewStore(str(book))
@@ -203,8 +206,8 @@ def test_review_workbook_with_invalid_verdict_is_rejected(tmp_path):
     sheet = workbook.active
     sheet.title = "review"
     sheet.append(COLUMNS)
-    sheet.append(["", "a.tif", str(tmp_path / "a.tif"), "maybe",
-                  "", "", "", "", ""])
+    sheet.append(["", "a.tif", "maybe", "", "", "", "", "",
+                  str(tmp_path / "a.tif")])
     workbook.save(book)
 
     with pytest.raises(InvalidWorkbook, match="invalid has_stamp"):
@@ -280,8 +283,8 @@ def test_duplicate_workbook_names_are_rejected_case_insensitively(tmp_path):
     sheet = workbook.active
     sheet.title = "review"
     sheet.append(COLUMNS)
-    sheet.append(["", "a.tif", "C:/a.tif", False, "", "", "", "", ""])
-    sheet.append(["", "A.TIF", "C:/A.TIF", False, "", "", "", "", ""])
+    sheet.append(["", "a.tif", False, "", "", "", "", "", "C:/a.tif"])
+    sheet.append(["", "A.TIF", False, "", "", "", "", "", "C:/A.TIF"])
     workbook.save(book)
 
     with pytest.raises(InvalidWorkbook, match="Duplicate file name"):
@@ -299,6 +302,68 @@ def test_save_preserves_workbook_only_rows_after_current_folder_rows(tmp_path):
     assert reloaded.load() == 2
     assert list(reloaded.records) == ["current.tif", "preserved.tif"]
     assert reloaded.counts(["current.tif"]) == (1, 0, 0)
+
+
+def test_subset_membership_round_trips_in_a_separate_sheet(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.record_for(str(tmp_path / "42175000720000-a.tif"))
+    store.record_for(str(tmp_path / "42175000720000-b.tif"))
+    store.record_for(str(tmp_path / "42175001200000-c.tif"))
+    store.replace_subset([
+        "42175001200000", "42175000720000", "42175001200000", "42175999999999",
+    ])
+    store.save(order=list(store.records))
+
+    workbook = load_workbook(book)
+    assert SUBSET_SHEET in workbook.sheetnames
+    subset = workbook[SUBSET_SHEET]
+    assert [cell.value for cell in subset[1]] == SUBSET_COLUMNS
+    assert [subset.cell(row=i, column=2).value for i in range(2, 5)] == [
+        "42175001200000", "42175000720000", "42175999999999",
+    ]
+
+    reloaded = ReviewStore(str(book))
+    reloaded.load()
+    assert reloaded.subset_apis == [
+        "42175001200000", "42175000720000", "42175999999999",
+    ]
+
+
+def test_legacy_workbook_without_subset_loads_with_no_membership(tmp_path):
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.record_for(str(tmp_path / "a.tif"))
+    store.save(order=["a.tif"])
+
+    reloaded = ReviewStore(str(book))
+    reloaded.load()
+    assert reloaded.subset_apis == []
+
+
+def test_malformed_subset_sheet_is_rejected(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.record_for(str(tmp_path / "a.tif"))
+    store.save(order=["a.tif"])
+    workbook = load_workbook(book)
+    subset = workbook.create_sheet(SUBSET_SHEET)
+    subset.append(["position", "wrong_header"])
+    subset.append([1, "42175000720000"])
+    workbook.save(book)
+
+    with pytest.raises(InvalidWorkbook, match="subset worksheet is missing"):
+        validate_review_workbook(str(book), {"a.tif"})
+
+
+def test_subset_rejects_invalid_api_values(tmp_path):
+    store = ReviewStore(str(tmp_path / "review.xlsx"))
+    with pytest.raises(ValueError, match="exactly 14 digits"):
+        store.replace_subset(["42175"])
 
 
 def test_remove_records_supports_reconciliation_rollback(tmp_path):
@@ -362,7 +427,32 @@ def test_adding_a_type_survives_a_round_trip_and_de_duplicates(tmp_path):
 
 def test_fixed_log_types_are_loaded_from_the_bundled_json():
     assert load_log_types() == DEFAULT_LOG_TYPES
-    assert DEFAULT_LOG_TYPES == ["Gamma", "Spontaneous Potential"]
+    assert DEFAULT_LOG_TYPES == [
+        "Caliper",
+        "Gamma Ray",
+        "Porosity",
+        "Resistivity deep",
+        "Resistivity medium",
+        "Resistivity shallow",
+        "Sonic",
+        "Spontaneous Potential",
+    ]
+
+
+def test_subset_api_matching_requires_a_leading_14_digit_number():
+    from logcv.review.app import ReviewApp, _parse_subset_api_lines
+
+    assert ReviewApp._leading_api("42175000720000-log.tif") == "42175000720000"
+    assert ReviewApp._leading_api("42175000720000_log.tif") == "42175000720000"
+    assert ReviewApp._leading_api("prefix-42175000720000.tif") == ""
+    assert ReviewApp._leading_api("421750007200001-log.tif") == ""
+
+    requested, duplicates, invalid = _parse_subset_api_lines([
+        "42175000720000", "", " 42175001200000 ", "42175000720000", "API",
+    ])
+    assert requested == ["42175000720000", "42175001200000"]
+    assert duplicates == 1
+    assert invalid == [(5, "API")]
 
 
 # ------------------------------------------------------------------ geometry

@@ -1,4 +1,4 @@
-# LogReview — reusable review of scanned geophysical logs
+# Geophysical Log Reviewer — reusable review of scanned geophysical logs
 
 **Status: reusable source application and standalone Windows build.** The product
 is installed from `src/logcv/review`; platform packaging lives separately under
@@ -74,7 +74,7 @@ inside; nothing is installed on the machine. The build script runs the packaged
 exe's own `--selftest` and refuses to report success if it fails.
 
 Starting with v1.5, the portable app checks the repository's latest published
-GitHub Release once per day. When a newer version is available, the only choices
+GitHub Release on every application start. When a newer version is available, the only choices
 are **Update now** and **Later**. Update now downloads the full ZIP, requires
 GitHub's SHA-256 asset digest to match, rejects unsafe archive paths, then closes
 the app and hands replacement to `LogReviewUpdater.exe`.
@@ -127,8 +127,11 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
   so a half-finished review resumes where it stopped.
 - `stamp_types.json` beside the workbook — the list of stamp types offered (created on first
   use, seeded with `IHS`).
-- Bundled `log_types.json` — the fixed log classifications offered by the app,
-  initially `Gamma` and `Spontaneous Potential`.
+- Bundled `log_types.json` — the fixed log classifications offered by the app:
+  `Caliper`, `Gamma Ray`, `Porosity`, `Resistivity deep`, `Resistivity medium`,
+  `Resistivity shallow`, `Sonic`, and `Spontaneous Potential`.
+- An optional UTF-8 text file containing one 14-digit API per nonblank line for
+  **Evaluate a subset**. Repeated APIs are ignored after their first occurrence.
 
 ## Steps
 
@@ -153,7 +156,13 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    a committed partial entry, and the toolbar counts
    `reviewed / total` and how many carry a stamp. The `show:` filter narrows the
    list to *to do* or *done*.
-6. **When the sweep is complete**, compare it against the detector's
+6. **Optionally evaluate a subset.** Click **Evaluate a subset…**, select a text
+   file containing one API per line, review the match summary, and create or
+   replace the workbook's `subset` sheet. Use **whole dataset** and **subset**
+   above the log list to switch scopes. One API includes every TIFF whose name
+   begins with that API. Unmatched valid APIs remain in the subset sheet and are
+   reported; malformed lines stop the import without changing the existing subset.
+7. **When the sweep is complete**, compare it against the detector's
    `stamp_inventory.csv` (join its `api14` to `log_api`) and promote as described in
    [Outputs](#outputs).
 
@@ -246,16 +255,20 @@ near-instant afterward.
   |---|---|
   | `log_api` | the 14-digit API parsed from the filename; text join key |
   | `file_link` | clickable hyperlink to the image; shows the file name |
-  | `file_path` | the same target as plain text (hyperlinks are invisible to pandas) |
   | `has_stamp` | Excel boolean `TRUE` / `FALSE`; **blank = not yet reviewed** |
   | `type_of_stamp` | ordered comma-separated stamp types; blank when `has_stamp` is `FALSE` |
   | `log_types` | comma-separated fixed log classifications |
   | `notes` | free text from the reviewer |
   | `reviewed_at` | local timestamp of the latest committed edit |
   | `reviewed_by` | active reviewer responsible for the latest committed edit |
+  | `file_path` | the same target as plain text (hyperlinks are invisible to pandas) |
 
   Header is frozen and auto-filtered. The sheet is **rewritten in full on every
   save**, so the file on disk is always the complete current answer.
+- Optional sheet `subset`, with columns `position` and `log_api`, stores the
+  ordered requested API membership. It never duplicates verdicts or notes; both
+  viewer scopes edit the same rows in `review`. Saving from subset mode still
+  writes every current-folder review row and preserves retained out-of-folder rows.
 - `stamp_types.json` beside the workbook — the type list, as above.
 - Bundled `log_types.json` — fixed choices maintained with the application.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and
@@ -301,8 +314,9 @@ that in the ledger with the version and date.
   slow and memory-hungry in a way the TIFFs are not.
 - The viewer is optimized for single-band scanned documents. Non-TIFF images are
   still loaded whole through PIL and do not use the persistent GDAL pyramid.
-- v1.2 and v1.3 workbooks may use `api14` and omit `log_types` or `reviewed_by`.
-  They are accepted as legacy input and rewritten to the nine-column v1.4 schema
+- v1.2 through v1.5 workbooks may use `api14`, omit `log_types`, `reviewed_by`,
+  or the optional `subset` sheet, and place `file_path` earlier in the schema.
+  They are accepted as legacy input and rewritten to the nine-column v1.6 schema
   on their next successful save without altering untouched review values.
 - The packaged executable is **unsigned**, so Windows SmartScreen shows "Windows
   protected your PC" on first launch on another machine — More info → Run anyway.

@@ -14,7 +14,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -25,8 +24,6 @@ GITHUB_REPOSITORY = "geophysical_log_reviewer"
 LATEST_RELEASE_API = (
     f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/releases/latest"
 )
-CHECK_INTERVAL_SECONDS = 24 * 60 * 60
-STATE_FILE = "update_check.json"
 UPDATER_EXE = "LogReviewUpdater.exe"
 
 
@@ -116,26 +113,18 @@ def fetch_latest_release(
 
 
 def update_check_due(cache_dir: str, *, now: float | None = None) -> bool:
-    """Limit automatic GitHub requests to once every 24 hours."""
-    try:
-        with open(os.path.join(cache_dir, STATE_FILE), encoding="utf-8") as handle:
-            checked = float(json.load(handle).get("last_checked", 0))
-    except (OSError, ValueError, TypeError, AttributeError):
-        return True
-    return (time.time() if now is None else now) - checked >= CHECK_INTERVAL_SECONDS
+    """Request an automatic update check once during every application start.
+
+    The application calls this gate once while initializing a frozen instance.
+    The arguments remain for compatibility with the previous daily-check policy.
+    """
+    del cache_dir, now
+    return True
 
 
 def record_update_check(cache_dir: str, *, now: float | None = None) -> None:
-    """Best-effort timestamp; update availability must never block the viewer."""
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        path = os.path.join(cache_dir, STATE_FILE)
-        temp = path + ".tmp"
-        with open(temp, "w", encoding="utf-8") as handle:
-            json.dump({"last_checked": time.time() if now is None else now}, handle)
-        os.replace(temp, path)
-    except OSError:
-        pass
+    """Compatibility no-op retained for callers from the daily-check policy."""
+    del cache_dir, now
 
 
 def _safe_extract(archive: str, destination: str) -> None:

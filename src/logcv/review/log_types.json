@@ -1,6 +1,12 @@
 {
   "types": [
-    "Gamma",
+    "Caliper",
+    "Gamma Ray",
+    "Porosity",
+    "Resistivity deep",
+    "Resistivity medium",
+    "Resistivity shallow",
+    "Sonic",
     "Spontaneous Potential"
   ]
 }

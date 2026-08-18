@@ -10,7 +10,6 @@ import zipfile
 import pytest
 
 from logcv.review.updates import (
-    CHECK_INTERVAL_SECONDS,
     ReleaseInfo,
     UpdateError,
     download_and_stage,
@@ -113,11 +112,11 @@ def test_zip_path_traversal_is_rejected(tmp_path):
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_automatic_check_is_limited_to_once_per_day(tmp_path):
+def test_automatic_check_is_due_on_every_app_start(tmp_path):
     assert update_check_due(str(tmp_path), now=1000)
     record_update_check(str(tmp_path), now=1000)
-    assert not update_check_due(str(tmp_path), now=1000 + CHECK_INTERVAL_SECONDS - 1)
-    assert update_check_due(str(tmp_path), now=1000 + CHECK_INTERVAL_SECONDS)
+    assert update_check_due(str(tmp_path), now=1000)
+    assert not (tmp_path / "update_check.json").exists()
 
 
 def _write_app(folder, label: str):

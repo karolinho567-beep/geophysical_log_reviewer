@@ -83,6 +83,29 @@ WARN_FG = "#b26a00"
 TODO_FG = "#8a8a8a"
 
 
+def _parse_subset_api_lines(
+    raw_lines: list[str],
+) -> tuple[list[str], int, list[tuple[int, str]]]:
+    """Return ordered unique APIs, duplicate count, and invalid line details."""
+    requested: list[str] = []
+    seen: set[str] = set()
+    duplicates = 0
+    invalid: list[tuple[int, str]] = []
+    for line_number, raw in enumerate(raw_lines, start=1):
+        value = raw.strip()
+        if not value:
+            continue
+        if len(value) != 14 or not value.isdigit():
+            invalid.append((line_number, value))
+            continue
+        if value in seen:
+            duplicates += 1
+            continue
+        seen.add(value)
+        requested.append(value)
+    return requested, duplicates, invalid
+
+
 @dataclass(frozen=True)
 class _Request:
     token: int
@@ -207,7 +230,7 @@ class ReviewApp(tk.Tk):
     def __init__(self, folder: str | None = None, workbook: str | None = None,
                  cache_dir: str | None = None, reviewer: str | None = None):
         super().__init__()
-        self.title("logcv review - stamp sweep")
+        self.title("Geophysical Log Reviewer")
         self.geometry("1500x950")   # the size it restores to when un-maximised
         self.minsize(1200, 760)
         try:
@@ -215,7 +238,9 @@ class ReviewApp(tk.Tk):
         except tk.TclError:         # pragma: no cover - other window managers
             self.attributes("-zoomed", True)
 
-        self.paths: list[str] = []
+        self.all_paths: list[str] = []
+        self.paths: list[str] = []  # active whole-dataset or subset view
+        self.view_mode = "all"
         self.infos: dict[str, pages.PageInfo] = {}
         self.index: int = -1
         self.folder: str = ""
@@ -256,6 +281,9 @@ class ReviewApp(tk.Tk):
         self._bind_keys()
         self.after(40, self._poll_results)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if _frozen() and not self._reviewer_override:
+            self._auto_update_scheduled = True
+            self.after(1500, self._auto_check_for_updates)
 
         start_folder = folder or _default_folder()
         if start_folder and os.path.isdir(start_folder):
@@ -329,25 +357,49 @@ class ReviewApp(tk.Tk):
             ttk.Radiobutton(filter_row, text=label, value=value,
                             variable=self.filter_var,
                             command=self._refresh_list).pack(side="left", padx=(4, 0))
+        ttk.Separator(filter_row, orient="vertical").pack(
+            side="left", fill="y", padx=(10, 8)
+        )
+        ttk.Label(filter_row, text="evaluate:").pack(side="left")
+        self.scope_var = tk.StringVar(value="all")
+        ttk.Radiobutton(
+            filter_row, text="whole dataset", value="all", variable=self.scope_var,
+            command=lambda: self._switch_scope("all"),
+        ).pack(side="left", padx=(4, 0))
+        self.subset_label_var = tk.StringVar(value="subset")
+        self.subset_scope_button = ttk.Radiobutton(
+            filter_row, textvariable=self.subset_label_var, value="subset",
+            variable=self.scope_var, command=lambda: self._switch_scope("subset"),
+            state="disabled",
+        )
+        self.subset_scope_button.pack(side="left", padx=(4, 0))
+        ttk.Button(
+            filter_row, text="Evaluate a subset…", command=self._evaluate_subset
+        ).pack(side="left", padx=(8, 0))
 
-        columns = ("rev", "file", "stamp", "type")
+        columns = ("rev", "file", "stamp", "type", "notes")
         self.tree = ttk.Treeview(left, columns=columns, show="headings",
                                  selectmode="browse", height=30)
         self.tree.heading("rev", text="Reviewed")
         self.tree.heading("file", text="Log file")
         self.tree.heading("stamp", text="Stamp")
         self.tree.heading("type", text="Type")
+        self.tree.heading("notes", text="Note")
         self.tree.column("rev", width=70, anchor="center", stretch=False)
         self.tree.column("file", width=290, anchor="w")
         self.tree.column("stamp", width=60, anchor="center", stretch=False)
         self.tree.column("type", width=90, anchor="w", stretch=False)
+        self.tree.column("notes", width=220, anchor="w", stretch=False)
         self.tree.tag_configure("done", foreground=DONE_FG)
         self.tree.tag_configure("warn", foreground=WARN_FG)
         self.tree.tag_configure("todo", foreground=TODO_FG)
         self.tree.grid(row=1, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=1, column=1, sticky="ns")
+        tree_y_scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        tree_x_scroll = ttk.Scrollbar(left, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=tree_y_scroll.set,
+                            xscrollcommand=tree_x_scroll.set)
+        tree_y_scroll.grid(row=1, column=1, sticky="ns")
+        tree_x_scroll.grid(row=2, column=0, sticky="ew")
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         # --- viewer ----------------------------------------------------------
@@ -391,12 +443,14 @@ class ReviewApp(tk.Tk):
         workflow.grid(row=2, column=0, columnspan=2, sticky="ew")
         workflow.grid_propagate(False)
         workflow.columnconfigure(0, weight=4, minsize=470)
-        workflow.columnconfigure(1, weight=2, minsize=250)
-        workflow.columnconfigure(2, weight=4, minsize=390)
+        workflow.columnconfigure(1, weight=0, minsize=34)
+        workflow.columnconfigure(2, weight=2, minsize=250)
+        workflow.columnconfigure(3, weight=0, minsize=34)
+        workflow.columnconfigure(4, weight=4, minsize=390)
         workflow.rowconfigure(0, weight=1)
 
         stamp = ttk.LabelFrame(workflow, text="1. Stamp review", padding=(10, 8))
-        stamp.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        stamp.grid(row=0, column=0, sticky="nsew")
         stamp.columnconfigure(1, weight=1)
         ttk.Label(stamp, text="Has stamp?", font=("Segoe UI", 10, "bold")
                   ).grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -426,9 +480,12 @@ class ReviewApp(tk.Tk):
         ttk.Button(stamp_actions, text="+ Add stamp type…", command=self._add_type
                    ).pack(side="left", padx=(6, 0))
 
+        ttk.Label(workflow, text="→", font=("Segoe UI", 20, "bold"),
+                  foreground="#1a5c2f").grid(row=0, column=1)
+
         log_section = ttk.LabelFrame(workflow, text="2. Log types (optional)",
                                      padding=(10, 8))
-        log_section.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
+        log_section.grid(row=0, column=2, sticky="nsew")
         log_section.rowconfigure(0, weight=1)
         log_section.columnconfigure(0, weight=1)
         self.log_type_canvas = tk.Canvas(log_section, highlightthickness=0, height=100)
@@ -457,8 +514,11 @@ class ReviewApp(tk.Tk):
         for value in list(self.log_types):
             self._ensure_log_type_option(value)
 
+        ttk.Label(workflow, text="→", font=("Segoe UI", 20, "bold"),
+                  foreground="#1a5c2f").grid(row=0, column=3)
+
         details = ttk.LabelFrame(workflow, text="3. Notes and entry", padding=(10, 8))
-        details.grid(row=0, column=2, sticky="nsew")
+        details.grid(row=0, column=4, sticky="nsew")
         details.columnconfigure(0, weight=1)
         ttk.Label(details, text="Notes (optional):").grid(row=0, column=0, sticky="w")
         self.notes_var = tk.StringVar(value="")
@@ -470,8 +530,13 @@ class ReviewApp(tk.Tk):
                   foreground="#8a5a00").grid(row=2, column=0, sticky="w")
         entry_actions = ttk.Frame(details)
         entry_actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        self.submit_button = ttk.Button(
-            entry_actions, text="Add entry", command=self.submit_entry, state="disabled"
+        self.submit_button = tk.Button(
+            entry_actions, text="Add entry  →", command=self.submit_entry,
+            state="disabled", font=("Segoe UI", 11, "bold"),
+            foreground="white", background="#1a7f37",
+            activeforeground="white", activebackground="#146c2e",
+            disabledforeground="#d5e5d9",
+            relief="flat", borderwidth=0, padx=18, pady=8, cursor="hand2",
         )
         self.submit_button.pack(side="left")
         ttk.Button(entry_actions, text="Next unreviewed  (Space)",
@@ -485,7 +550,8 @@ class ReviewApp(tk.Tk):
         self.columnconfigure(1, weight=1)
 
         self.welcome = ttk.Frame(self, padding=40)
-        ttk.Label(self.welcome, text="LogReview", font=("Segoe UI", 24, "bold")
+        ttk.Label(self.welcome, text="Geophysical Log Reviewer",
+                  font=("Segoe UI", 24, "bold")
                   ).pack(pady=(50, 10))
         ttk.Label(
             self.welcome,
@@ -636,7 +702,7 @@ class ReviewApp(tk.Tk):
     def _pick_workbook(self) -> None:
         if not self.folder:
             return
-        self._choose_workbook(self.folder, self.paths)
+        self._choose_workbook(self.folder, self.all_paths)
 
     def _prompt_reviewer(self, default: str = "") -> str | None:
         while True:
@@ -811,15 +877,18 @@ class ReviewApp(tk.Tk):
         # Commit the switch only after both inputs have been checked. A rejected
         # workbook must leave the currently open review completely untouched.
         self.folder = folder_abs
-        self.paths = found
+        self.all_paths = found
+        self.paths = list(found)
+        self.view_mode = "all"
+        self.scope_var.set("all")
         self.infos = {}
         self.index = -1
         self.store = new_store
         self.reviewer = reviewer
         self.reviewer_var.set(reviewer)
-        for path in self.paths:  # seed rows so the workbook lists every file
+        for path in self.all_paths:  # seed rows so the workbook lists every file
             self.store.record_for(path, pages.api14_from_name(path))
-        self.folder_var.set(f"{self.folder}   ({len(self.paths)} images)")
+        self.folder_var.set(f"{self.folder}   ({len(self.all_paths)} images)")
         self.workbook_var.set(self.store.path)
         self.saved_var.set("saved earlier" if os.path.exists(self.store.path)
                            else "not saved yet")
@@ -830,16 +899,187 @@ class ReviewApp(tk.Tk):
             if used.lower() not in {t.lower() for t in self.types}:
                 self.types.append(used)
         self._update_stamp_choices()
+        self._refresh_scope_controls()
 
-        self.title(f"logcv review - {os.path.basename(self.folder)}")
+        self.title(f"Geophysical Log Reviewer - {os.path.basename(self.folder)}")
         self._hide_welcome()
         self._refresh_list()
         first = self._first_unreviewed()
         self.select_index(first if first is not None else 0)
-        if _frozen() and not self._reviewer_override and not self._auto_update_scheduled:
-            self._auto_update_scheduled = True
-            self.after(1500, self._auto_check_for_updates)
         return True
+
+    # -------------------------------------------------------------- subsets
+
+    @staticmethod
+    def _leading_api(path: str) -> str:
+        """Return a leading 14-digit API, never a number later in the name."""
+        name = os.path.basename(path)
+        api = name[:14]
+        if len(api) != 14 or not api.isdigit():
+            return ""
+        if len(name) > 14 and name[14].isdigit():
+            return ""
+        return api
+
+    def _subset_paths(self) -> list[str]:
+        if self.store is None or not self.store.subset_apis:
+            return []
+        wanted = set(self.store.subset_apis)
+        return [path for path in self.all_paths if self._leading_api(path) in wanted]
+
+    def _refresh_scope_controls(self) -> None:
+        requested = len(self.store.subset_apis) if self.store is not None else 0
+        matched = len(self._subset_paths())
+        self.subset_label_var.set(
+            f"subset ({matched} log{'s' if matched != 1 else ''})"
+            if requested else "subset"
+        )
+        self.subset_scope_button.configure(state="normal" if matched else "disabled")
+        if self.view_mode == "subset" and not matched:
+            self.view_mode = "all"
+            self.scope_var.set("all")
+            self.paths = list(self.all_paths)
+
+    def _switch_scope(self, mode: str) -> bool:
+        """Switch navigation/progress between all TIFFs and the saved subset."""
+        if mode not in {"all", "subset"}:
+            self.scope_var.set(self.view_mode)
+            return False
+        target = list(self.all_paths) if mode == "all" else self._subset_paths()
+        if mode == self.view_mode and target == self.paths:
+            self.scope_var.set(self.view_mode)
+            return True
+        if mode == "subset" and not target:
+            self.scope_var.set(self.view_mode)
+            messagebox.showwarning(
+                "Subset has no matching logs",
+                "Create a subset containing API numbers found at the beginning of "
+                "the loaded TIFF filenames.",
+                parent=self,
+            )
+            return False
+        if not self._resolve_pending_draft():
+            self.scope_var.set(self.view_mode)
+            return False
+
+        previous_path = self.current_path
+        self.view_mode = mode
+        self.scope_var.set(mode)
+        self.paths = target
+        self.index = -1
+        self._refresh_list()
+        next_index = None
+        if previous_path:
+            previous_key = os.path.normcase(os.path.abspath(previous_path))
+            next_index = next(
+                (i for i, path in enumerate(self.paths)
+                 if os.path.normcase(os.path.abspath(path)) == previous_key),
+                None,
+            )
+        if next_index is None:
+            next_index = self._first_unreviewed()
+        self.select_index(next_index if next_index is not None else 0)
+        return True
+
+    def _evaluate_subset(self) -> None:
+        """Import one API per line, save membership, and enter subset mode."""
+        if self.store is None or not self.all_paths:
+            messagebox.showwarning(
+                "No review is open",
+                "Open a folder of geophysical logs before creating a subset.",
+                parent=self,
+            )
+            return
+        if not self._resolve_pending_draft():
+            return
+        source = filedialog.askopenfilename(
+            title="Select a text file containing one API number per line",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialdir=self.folder or os.getcwd(),
+            parent=self,
+        )
+        if not source:
+            return
+        try:
+            with open(source, encoding="utf-8-sig") as handle:
+                raw_lines = handle.read().splitlines()
+        except (OSError, UnicodeError) as exc:
+            messagebox.showerror("Cannot read API list", f"{source}\n\n{exc}", parent=self)
+            return
+
+        requested, duplicates, invalid = _parse_subset_api_lines(raw_lines)
+        if invalid:
+            shown = "\n".join(
+                f"Line {line}: {value}" for line, value in invalid[:10]
+            )
+            if len(invalid) > 10:
+                shown += f"\n…and {len(invalid) - 10} more"
+            messagebox.showerror(
+                "Invalid API list",
+                "Each nonblank line must contain exactly one 14-digit API number.\n\n"
+                + shown,
+                parent=self,
+            )
+            return
+        if not requested:
+            messagebox.showwarning(
+                "Empty API list", "The selected file contains no API numbers.", parent=self
+            )
+            return
+
+        requested_set = set(requested)
+        matched_paths = [
+            path for path in self.all_paths if self._leading_api(path) in requested_set
+        ]
+        matched_apis = {self._leading_api(path) for path in matched_paths}
+        unmatched = [api for api in requested if api not in matched_apis]
+        if not matched_paths:
+            messagebox.showwarning(
+                "No matching logs",
+                "None of the requested APIs match the beginning of a loaded TIFF filename. "
+                "The existing subset was not changed.",
+                parent=self,
+            )
+            return
+
+        summary = (
+            f"Requested APIs: {len(requested)}\n"
+            f"Matched APIs: {len(matched_apis)}\n"
+            f"Matched TIFFs: {len(matched_paths)}\n"
+            f"Unmatched APIs retained in the subset sheet: {len(unmatched)}\n"
+            f"Duplicate lines ignored: {duplicates}"
+        )
+        if unmatched:
+            summary += "\n\nUnmatched:\n" + "\n".join(
+                f"  {api}" for api in unmatched[:8]
+            )
+            if len(unmatched) > 8:
+                summary += f"\n  …and {len(unmatched) - 8} more"
+        action = self._choice_dialog(
+            "Create evaluation subset",
+            summary,
+            [(
+                "Replace subset" if self.store.subset_apis else "Create subset",
+                "continue",
+            ), ("Cancel", "cancel")],
+            "cancel",
+        )
+        if action != "continue":
+            return
+
+        old_subset = list(self.store.subset_apis)
+        old_dirty = self.store.dirty
+        self.store.replace_subset(requested)
+        if not self._save_store(quiet=True):
+            self.store.subset_apis = old_subset
+            self.store.dirty = old_dirty
+            self._refresh_scope_controls()
+            return
+        self._refresh_scope_controls()
+        self._switch_scope("subset")
+        self.status_var.set(
+            f"Evaluating {len(matched_paths)} TIFF(s) from {len(matched_apis)} API(s)."
+        )
 
     # ----------------------------------------------------------------- list
 
@@ -870,10 +1110,10 @@ class ReviewApp(tk.Tk):
     def _row_values(self, i: int) -> tuple:
         record = self.store.records.get(os.path.basename(self.paths[i]))
         if record is None or not record.has_entry:
-            return ("", os.path.basename(self.paths[i]), "", "")
+            return ("", os.path.basename(self.paths[i]), "", "", "")
         mark = WARN if record.incomplete else CHECK
         stamp = "" if record.has_stamp is None else ("yes" if record.has_stamp else "no")
-        return (mark, record.file_name, stamp, record.stamp_type)
+        return (mark, record.file_name, stamp, record.stamp_type, record.notes)
 
     def _row_tag(self, i: int) -> str:
         record = self.store.records.get(os.path.basename(self.paths[i]))
@@ -890,7 +1130,8 @@ class ReviewApp(tk.Tk):
         names = [os.path.basename(path) for path in self.paths]
         reviewed, with_stamp, incomplete = self.store.counts(names)
         total = len(self.paths)
-        text = f"{reviewed} / {total} reviewed   |   {with_stamp} with a stamp"
+        scope = " in subset" if self.view_mode == "subset" else ""
+        text = f"{reviewed} / {total} reviewed{scope}   |   {with_stamp} with a stamp"
         if incomplete:
             text += f"   |   {incomplete} incomplete entries"
         self.progress_var.set(text)
@@ -1403,12 +1644,12 @@ class ReviewApp(tk.Tk):
 
     def _refresh_submission_state(self) -> None:
         if self._baseline_draft is None:
-            self.submit_button.configure(state="disabled", text="Add entry")
+            self.submit_button.configure(state="disabled", text="Add entry  →")
             return
         changed = self._draft_changed()
         valid = self._draft_valid()
         self.submit_button.configure(
-            text="Update entry" if self._entry_existed else "Add entry",
+            text="Update entry  →" if self._entry_existed else "Add entry  →",
             state="normal" if changed and valid else "disabled",
         )
         if self._draft_has_stamp is True and not valid:
@@ -1536,7 +1777,8 @@ class ReviewApp(tk.Tk):
             if record is None or not record.reviewed:
                 self.select_index(i)
                 return
-        self.status_var.set("every log in this folder has a verdict.")
+        scope = "subset" if self.view_mode == "subset" else "folder"
+        self.status_var.set(f"every log in this {scope} has a verdict.")
 
     # ----------------------------------------------------------------- save
 
@@ -1555,7 +1797,7 @@ class ReviewApp(tk.Tk):
     def _save_store(self, quiet: bool = False) -> bool:
         if self.store is None:
             return False
-        order = [os.path.basename(p) for p in self.paths]
+        order = [os.path.basename(p) for p in self.all_paths]
         try:
             path = self.store.save(order)
         except WorkbookLocked as exc:
@@ -1566,7 +1808,7 @@ class ReviewApp(tk.Tk):
             messagebox.showerror("Could not save", f"{self.store.path}\n\n{exc}",
                                  parent=self)
             return False
-        names = {os.path.basename(path).casefold() for path in self.paths}
+        names = {os.path.basename(path).casefold() for path in self.all_paths}
         entries = sum(record.has_entry for name, record in self.store.records.items()
                       if name.casefold() in names)
         stamp = _dt.datetime.now().strftime("%H:%M:%S")
@@ -1842,7 +2084,13 @@ def selftest(folder: str | None = None) -> int:
                 time.sleep(0.02)
 
             check("window built", app.winfo_exists() == 1)
+            check(
+                "product title",
+                app.title().startswith("Geophysical Log Reviewer"),
+                app.title(),
+            )
             check("folder listed", bool(app.paths), f"{len(app.paths)} images")
+            check("notes column visible", "notes" in app.tree["columns"])
             check("page opened", app.current_path is not None,
                   os.path.basename(app.current_path or ""))
             check("page rendered", app._photo is not None,
@@ -1929,7 +2177,7 @@ def selftest(folder: str | None = None) -> int:
             check("Yes requires a stamp type", str(app.submit_button["state"]) == "disabled")
             app._stamp_rows[0]["var"].set(app.types[0])
             app._on_stamp_selected(app._stamp_rows[0])
-            app.log_type_vars["Gamma"].set(True)
+            app.log_type_vars["Gamma Ray"].set(True)
             app.log_type_vars["Spontaneous Potential"].set(True)
             app._on_draft_changed()
             check(
@@ -2028,7 +2276,7 @@ def selftest(folder: str | None = None) -> int:
             check(
                 "log types round-tripped",
                 verdict is not None
-                and verdict.log_types == "Gamma, Spontaneous Potential",
+                and verdict.log_types == "Gamma Ray, Spontaneous Potential",
                 getattr(verdict, "log_types", ""),
             )
             check(
@@ -2036,9 +2284,35 @@ def selftest(folder: str | None = None) -> int:
                 verdict is not None and verdict.reviewed_by == "SELFTEST",
                 getattr(verdict, "reviewed_by", ""),
             )
+
+            leading_apis = []
+            for path in app.all_paths:
+                api = app._leading_api(path)
+                if api and api not in leading_apis:
+                    leading_apis.append(api)
+            if leading_apis:
+                app.store.replace_subset([leading_apis[0], "99999999999999"])
+                subset_saved = app._save_store(quiet=True)
+                app._refresh_scope_controls()
+                subset_opened = app._switch_scope("subset")
+                subset_count = len(app.paths)
+                app._switch_scope("all")
+                subset_reload = ReviewStore(book)
+                subset_rows = subset_reload.load()
+                check(
+                    "subset sheet and scope preserve the full review",
+                    subset_saved and subset_opened and subset_count >= 1
+                    and subset_rows == len(app.all_paths)
+                    and subset_reload.subset_apis
+                    == [leading_apis[0], "99999999999999"],
+                    f"{subset_count} subset / {subset_rows} workbook rows",
+                )
+            else:
+                check("subset sheet and scope preserve the full review", False,
+                      "no leading API in self-test TIFF names")
             try:
                 validate_review_workbook(
-                    book, {os.path.basename(path) for path in app.paths}
+                    book, {os.path.basename(path) for path in app.all_paths}
                 )
                 workbook_valid = True
             except InvalidWorkbook:

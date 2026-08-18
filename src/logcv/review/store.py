@@ -24,19 +24,22 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-#: Sheet the rows live on.
+#: Sheet the review rows live on.
 SHEET = "review"
-#: Header row, in order. The first three are the columns the task asked for.
+#: Optional sheet containing the ordered API membership for subset mode.
+SUBSET_SHEET = "subset"
+SUBSET_COLUMNS = ["position", "log_api"]
+#: Review header row, in order.
 COLUMNS = [
     "log_api",        # 14-digit API parsed from the file name
     "file_link",      # hyperlink to the image, shows the file name
-    "file_path",      # same target as file_link, readable by pandas
     "has_stamp",      # TRUE / FALSE / blank when not yet reviewed
     "type_of_stamp",  # comma-separated stamp types; blank when FALSE
     "log_types",      # comma-separated fixed log classifications
     "notes",          # free text from the reviewer
     "reviewed_at",    # ISO timestamp of the latest committed edit
     "reviewed_by",    # reviewer responsible for the latest committed edit
+    "file_path",      # same target as file_link, readable by pandas
 ]
 #: Required in all supported schemas. ``api14`` is accepted as the legacy alias
 #: for ``log_api``; ``log_types`` and ``reviewed_by`` were added later.
@@ -47,7 +50,16 @@ REQUIRED_COLUMNS = [
 DEFAULT_STAMP_TYPES = ["IHS"]
 #: Name of the editable list, kept beside the workbook.
 STAMP_TYPES_FILE = "stamp_types.json"
-DEFAULT_LOG_TYPES = ["Gamma", "Spontaneous Potential"]
+DEFAULT_LOG_TYPES = [
+    "Caliper",
+    "Gamma Ray",
+    "Porosity",
+    "Resistivity deep",
+    "Resistivity medium",
+    "Resistivity shallow",
+    "Sonic",
+    "Spontaneous Potential",
+]
 
 _TRUE = {"true", "yes", "y", "1", "t"}
 _FALSE = {"false", "no", "n", "0", "f"}
@@ -160,6 +172,55 @@ def _parse_bool(value) -> bool | None:
     return None
 
 
+def _read_subset_apis(sheet) -> list[str]:
+    """Read and validate the app-owned API subset worksheet."""
+    rows = sheet.iter_rows(values_only=True)
+    try:
+        first = next(rows)
+    except StopIteration as exc:
+        raise InvalidWorkbook("The subset worksheet is empty.") from exc
+    header = {
+        str(value).strip().lower(): i
+        for i, value in enumerate(first) if value is not None
+    }
+    missing = [name for name in SUBSET_COLUMNS if name not in header]
+    if missing:
+        raise InvalidWorkbook(
+            "The subset worksheet is missing columns: " + ", ".join(missing)
+        )
+    positioned: list[tuple[int, str]] = []
+    seen_positions: set[int] = set()
+    seen_apis: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        def value(column: str):
+            index = header[column]
+            return row[index] if index < len(row) else None
+
+        raw_position = value("position")
+        raw_api = value("log_api")
+        if raw_position in (None, "") and raw_api in (None, ""):
+            continue
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError) as exc:
+            raise InvalidWorkbook(
+                f"Subset row {row_number} has an invalid position."
+            ) from exc
+        api = str(raw_api or "").strip()
+        if position < 1 or position in seen_positions:
+            raise InvalidWorkbook(
+                f"Subset row {row_number} has a duplicate or invalid position."
+            )
+        if len(api) != 14 or not api.isdigit() or api in seen_apis:
+            raise InvalidWorkbook(
+                f"Subset row {row_number} must contain a unique 14-digit log_api."
+            )
+        seen_positions.add(position)
+        seen_apis.add(api)
+        positioned.append((position, api))
+    return [api for _, api in sorted(positioned)]
+
+
 def validate_review_workbook(
     path: str, image_names: set[str] | None = None
 ) -> WorkbookInspection:
@@ -227,6 +288,8 @@ def validate_review_workbook(
                     )
         else:
             workbook_names = []
+        if SUBSET_SHEET in book.sheetnames:
+            _read_subset_apis(book[SUBSET_SHEET])
     finally:
         book.close()
 
@@ -252,6 +315,7 @@ class ReviewStore:
     def __init__(self, path: str):
         self.path = os.path.abspath(path)
         self.records: dict[str, Record] = {}
+        self.subset_apis: list[str] = []
         self.dirty = False
 
     # ------------------------------------------------------------------ load
@@ -259,6 +323,7 @@ class ReviewStore:
     def load(self) -> int:
         """Read existing verdicts. Returns how many rows were found."""
         self.records.clear()
+        self.subset_apis.clear()
         if not os.path.exists(self.path):
             return 0
         book = load_workbook(self.path, data_only=True)
@@ -306,6 +371,8 @@ class ReviewStore:
             )
             self.records[name] = record
             found += 1
+        if SUBSET_SHEET in book.sheetnames:
+            self.subset_apis = _read_subset_apis(book[SUBSET_SHEET])
         book.close()
         return found
 
@@ -368,6 +435,20 @@ class ReviewStore:
             self.records.pop(name)
         return removed
 
+    def replace_subset(self, api_numbers: list[str]) -> None:
+        """Replace ordered subset membership, de-duplicating APIs in place."""
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for value in api_numbers:
+            api = str(value).strip()
+            if len(api) != 14 or not api.isdigit():
+                raise ValueError(f"Subset API must contain exactly 14 digits: {value!r}")
+            if api not in seen:
+                ordered.append(api)
+                seen.add(api)
+        self.subset_apis = ordered
+        self.dirty = True
+
     # ------------------------------------------------------------------ save
 
     def save(self, order: list[str] | None = None) -> str:
@@ -400,20 +481,36 @@ class ReviewStore:
             if record.file_path:
                 link.hyperlink = record.file_path
                 link.font = link_font
-            sheet.cell(row=row_i, column=3, value=record.file_path or None)
-            sheet.cell(row=row_i, column=4, value=record.has_stamp)
-            sheet.cell(row=row_i, column=5, value=record.stamp_type or None)
-            sheet.cell(row=row_i, column=6, value=record.log_types or None)
-            sheet.cell(row=row_i, column=7, value=record.notes or None)
-            sheet.cell(row=row_i, column=8, value=record.reviewed_at or None)
-            sheet.cell(row=row_i, column=9, value=record.reviewed_by or None)
+            sheet.cell(row=row_i, column=3, value=record.has_stamp)
+            sheet.cell(row=row_i, column=4, value=record.stamp_type or None)
+            sheet.cell(row=row_i, column=5, value=record.log_types or None)
+            sheet.cell(row=row_i, column=6, value=record.notes or None)
+            sheet.cell(row=row_i, column=7, value=record.reviewed_at or None)
+            sheet.cell(row=row_i, column=8, value=record.reviewed_by or None)
+            sheet.cell(row=row_i, column=9, value=record.file_path or None)
 
-        widths = [16, 46, 70, 11, 24, 28, 40, 20, 16]
+        widths = [16, 46, 11, 24, 28, 40, 20, 16, 70]
         for col, width in enumerate(widths, start=1):
             sheet.column_dimensions[get_column_letter(col)].width = width
         sheet.freeze_panes = "A2"
         last = max(2, len(names) + 1)
         sheet.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{last}"
+
+        if self.subset_apis:
+            subset = book.create_sheet(SUBSET_SHEET)
+            for col, name in enumerate(SUBSET_COLUMNS, start=1):
+                cell = subset.cell(row=1, column=col, value=name)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center")
+            for position, api in enumerate(self.subset_apis, start=1):
+                subset.cell(row=position + 1, column=1, value=position)
+                api_cell = subset.cell(row=position + 1, column=2, value=api)
+                api_cell.number_format = "@"
+            subset.column_dimensions["A"].width = 10
+            subset.column_dimensions["B"].width = 18
+            subset.freeze_panes = "A2"
+            subset.auto_filter.ref = f"A1:B{len(self.subset_apis) + 1}"
 
         folder = os.path.dirname(self.path)
         if folder:

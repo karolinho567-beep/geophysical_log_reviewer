@@ -1,11 +1,11 @@
-# LogReview
+# Geophysical Log Reviewer
 
 LogReview is a reusable Windows desktop application for reviewing scanned
 geophysical logs without modifying the source images. It renders very large TIFFs
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.5.0**
+Current version: **1.6.0**
 
 ## Features
 
@@ -14,12 +14,14 @@ Current version: **1.5.0**
 - Fast zooming and scrolling through persistent reduced-resolution tile caches.
 - Explicit draft-and-commit workflow for stamp verdicts, multiple stamp types,
   fixed log classifications, notes, timestamps, and reviewer attribution.
+- Displays notes in the log list and supports a persistent API-based subset view
+  without duplicating review answers.
 - Reconciles an existing workbook with a changed TIFF folder while protecting the
   original workbook and preserving optional out-of-folder rows.
 - Migrates compatible v1.2 and v1.3 workbooks to the current nine-column schema.
 - Builds as a portable Windows x64 application; Python is not required on the
   reviewer's computer.
-- Checks public GitHub Releases once per day and can securely replace and restart
+- Checks public GitHub Releases on every application start and can securely replace and restart
   the portable application after verifying GitHub's SHA-256 asset digest.
 
 ## Install from source

@@ -56,7 +56,7 @@ RUN IT
     Existing workbooks are checked and reconciled before they are opened.
     Disposable image pyramids are stored under "cache" beside the executable;
     source images are never modified.
-    LogReview checks public GitHub releases once per day. If a newer version is
+    LogReview checks public GitHub releases on every application start. If a newer version is
     available, choose Update now or Later. Verified updates preserve review
     workbooks and caches, then restart the application.
 
