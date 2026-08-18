@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.4.0**
+Current version: **1.5.0**
 
 ## Features
 
@@ -19,6 +19,8 @@ Current version: **1.4.0**
 - Migrates compatible v1.2 and v1.3 workbooks to the current nine-column schema.
 - Builds as a portable Windows x64 application; Python is not required on the
   reviewer's computer.
+- Checks public GitHub Releases once per day and can securely replace and restart
+  the portable application after verifying GitHub's SHA-256 asset digest.
 
 ## Install from source
 

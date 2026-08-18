@@ -68,10 +68,23 @@ conda activate logreview-build
 python packaging\windows\build_exe.py
 ```
 
-Produces `dist/windows/LogReview_v<version>_<date>.zip` — unzip anywhere writable,
+Produces `dist/windows/LogReview_v<version>_windows_x64.zip` — unzip anywhere writable,
 double-click `LogReview.exe`. Python, Tk, GDAL, Pillow and openpyxl are all
 inside; nothing is installed on the machine. The build script runs the packaged
 exe's own `--selftest` and refuses to report success if it fails.
+
+Starting with v1.5, the portable app checks the repository's latest published
+GitHub Release once per day. When a newer version is available, the only choices
+are **Update now** and **Later**. Update now downloads the full ZIP, requires
+GitHub's SHA-256 asset digest to match, rejects unsafe archive paths, then closes
+the app and hands replacement to `LogReviewUpdater.exe`.
+
+The updater preserves `reviews/`, `cache/`, any workbook stored directly in the
+portable app folder, and `stamp_types.json`. It retains one sibling
+`.LogReview.previous` application directory for rollback. A failed download or
+verification changes nothing; a replacement or restart failure restores the
+previous application. Because v1.4 has no update checker, v1.5 must be installed
+manually once. Later releases can update automatically.
 
 Build it from the **`logreview-build`** env, not the project env:
 
@@ -248,7 +261,7 @@ near-instant afterward.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and
   source identity metadata. Delete them at any time to force regeneration.
 
-- `dist/windows/LogReview_v<version>_<date>.zip` and
+- `dist/windows/LogReview_v<version>_windows_x64.zip` and its `.sha256` file, plus
   `dist/windows/LogReview/` — the standalone build;
   `dist/windows/build_report.txt` and `selftest_report.txt` record its size and
   verification run. Build scratch (`build/windows/`) is disposable.
@@ -295,6 +308,10 @@ that in the ledger with the version and date.
   protected your PC" on first launch on another machine — More info → Run anyway.
   Some corporate policies block unsigned executables outright; there is no fix
   short of code-signing.
+- The updater verifies integrity but the executables are not yet Authenticode-
+  signed. SHA-256 verification protects against corrupt or substituted downloads
+  relative to GitHub's metadata; a certificate is still required to establish
+  publisher identity and reduce SmartScreen warnings.
 - The build is **Windows x64 only**, and it freezes whatever the
   `logreview-build` environment holds. A fix to `src/logcv/` reaches packaged
   users only after a rebuild and re-send. The ZIP version comes from

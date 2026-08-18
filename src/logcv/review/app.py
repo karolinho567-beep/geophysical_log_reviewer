@@ -39,6 +39,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import ImageTk
 
+from logcv import __version__
+
 from . import pages
 from .store import (
     InvalidWorkbook,
@@ -52,6 +54,15 @@ from .store import (
     split_values,
     stamp_types_path,
     validate_review_workbook,
+)
+from .updates import (
+    ReleaseInfo,
+    StagedUpdate,
+    download_and_stage,
+    fetch_latest_release,
+    launch_staged_update,
+    record_update_check,
+    update_check_due,
 )
 
 #: Zoom ladder, screen px per page px. Fit-to-page can sit below the bottom rung.
@@ -219,6 +230,10 @@ class ReviewApp(tk.Tk):
         self._stamp_rows: list[dict[str, object]] = []
         self._entry_existed = False
         self._tree_selection_guard = False
+        self._update_results: "queue.Queue" = queue.Queue()
+        self._update_check_running = False
+        self._auto_update_scheduled = False
+        self._update_progress = None
         self.cache_dir = os.path.abspath(cache_dir or _default_cache_dir())
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -292,6 +307,10 @@ class ReviewApp(tk.Tk):
                   ).pack(side="left")
         ttk.Button(actions, text="Change", command=self._change_reviewer
                    ).pack(side="left", padx=(5, 0))
+        self.update_button = ttk.Button(
+            actions, text="Check for updates", command=lambda: self._check_for_updates(True)
+        )
+        self.update_button.pack(side="left", padx=(10, 0))
         self.saved_var = tk.StringVar(value="not saved yet")
         ttk.Label(actions, textvariable=self.saved_var, foreground="#555", width=26,
                   anchor="e").pack(side="left", padx=(8, 0))
@@ -817,6 +836,9 @@ class ReviewApp(tk.Tk):
         self._refresh_list()
         first = self._first_unreviewed()
         self.select_index(first if first is not None else 0)
+        if _frozen() and not self._reviewer_override and not self._auto_update_scheduled:
+            self._auto_update_scheduled = True
+            self.after(1500, self._auto_check_for_updates)
         return True
 
     # ----------------------------------------------------------------- list
@@ -1154,6 +1176,15 @@ class ReviewApp(tk.Tk):
                 self.status_var.set(f"render failed: {error}")
             elif request.token == self._token:
                 self._draw(image)
+        while True:
+            try:
+                kind, payload, error, manual = self._update_results.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "check":
+                self._finish_update_check(payload, error, manual)
+            elif kind == "download":
+                self._finish_update_download(payload, error)
         self.after(40, self._poll_results)
 
     def _draw(self, image) -> None:
@@ -1545,6 +1576,137 @@ class ReviewApp(tk.Tk):
             self.status_var.set(f"saved {entries} entries to {path}")
         return True
 
+    # --------------------------------------------------------------- updates
+
+    def _auto_check_for_updates(self) -> None:
+        if update_check_due(self.cache_dir):
+            self._check_for_updates(False)
+
+    def _check_for_updates(self, manual: bool = False) -> None:
+        if self._update_check_running:
+            return
+        if not _frozen():
+            if manual:
+                messagebox.showinfo(
+                    "Updates",
+                    "Automatic installation is available in the portable Windows app.\n\n"
+                    f"This source checkout is LogReview {__version__}.",
+                    parent=self,
+                )
+            return
+        self._update_check_running = True
+        self.update_button.configure(state="disabled", text="Checkingâ€¦")
+
+        def check() -> None:
+            release = None
+            error = None
+            try:
+                release = fetch_latest_release(__version__)
+            except Exception as exc:
+                error = exc
+            finally:
+                record_update_check(self.cache_dir)
+            self._update_results.put(("check", release, error, manual))
+
+        threading.Thread(target=check, daemon=True, name="logreview-update-check").start()
+
+    def _finish_update_check(
+        self, release: ReleaseInfo | None, error: Exception | None, manual: bool
+    ) -> None:
+        self._update_check_running = False
+        self.update_button.configure(state="normal", text="Check for updates")
+        if error is not None:
+            if manual:
+                messagebox.showerror(
+                    "Could not check for updates",
+                    f"LogReview {__version__} is still ready to use.\n\n{error}",
+                    parent=self,
+                )
+            return
+        if release is None:
+            if manual:
+                messagebox.showinfo(
+                    "LogReview is up to date",
+                    f"You are running the latest version: {__version__}.",
+                    parent=self,
+                )
+            return
+        self._offer_update(release)
+
+    def _offer_update(self, release: ReleaseInfo) -> None:
+        action = self._choice_dialog(
+            "LogReview update available",
+            f"LogReview {release.version} is available.\n\n"
+            "Download and install it now? LogReview will close and restart. "
+            "Review workbooks and image caches will be preserved.",
+            [("Update now", "update"), ("Later", "later")],
+            "later",
+        )
+        if action != "update":
+            return
+        if self.index >= 0 and not self._resolve_pending_draft():
+            return
+        self._start_update_download(release)
+
+    def _start_update_download(self, release: ReleaseInfo) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Downloading LogReview update")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        body = ttk.Frame(dialog, padding=22)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=f"Downloading and verifying LogReview {release.version}â€¦",
+        ).pack(anchor="w", pady=(0, 12))
+        progress = ttk.Progressbar(body, mode="indeterminate", length=440)
+        progress.pack(fill="x")
+        progress.start(12)
+        dialog.grab_set()
+        self._update_progress = dialog
+
+        def download() -> None:
+            staged = None
+            error = None
+            try:
+                staged = download_and_stage(release)
+            except Exception as exc:
+                error = exc
+            self._update_results.put(("download", staged, error, True))
+
+        threading.Thread(target=download, daemon=True, name="logreview-update-download").start()
+
+    def _finish_update_download(
+        self, staged: StagedUpdate | None, error: Exception | None
+    ) -> None:
+        if self._update_progress is not None:
+            try:
+                self._update_progress.grab_release()
+                self._update_progress.destroy()
+            except tk.TclError:
+                pass
+            self._update_progress = None
+        if error is not None or staged is None:
+            messagebox.showerror(
+                "Update download failed",
+                "Nothing in the installed application was changed.\n\n"
+                + str(error or "The update could not be staged."),
+                parent=self,
+            )
+            return
+        try:
+            launch_staged_update(staged)
+        except Exception as exc:
+            messagebox.showerror(
+                "Could not start updater",
+                f"Nothing in the installed application was changed.\n\n{exc}",
+                parent=self,
+            )
+            return
+        self._worker.shutdown()
+        self.destroy()
+
     def _on_close(self) -> None:
         if not self._resolve_pending_draft():
             return
@@ -1686,6 +1848,33 @@ def selftest(folder: str | None = None) -> int:
             check("page rendered", app._photo is not None,
                   f"{app._photo.width()}x{app._photo.height()}" if app._photo else "no bitmap")
             check("reviewer displayed", app.reviewer_var.get() == "SELFTEST")
+            check("update control available", app.update_button.winfo_exists() == 1)
+            update_choices = []
+            original_choice = app._choice_dialog
+            try:
+                def capture_update(_title, _message, choices, _cancel):
+                    update_choices.extend(label for label, _value in choices)
+                    return "later"
+
+                app._choice_dialog = capture_update
+                app._offer_update(ReleaseInfo(
+                    version="9.9.9", tag="v9.9.9", asset_name="test.zip",
+                    download_url="https://example.invalid/test.zip", size=1,
+                    sha256="0" * 64,
+                ))
+            finally:
+                app._choice_dialog = original_choice
+            check(
+                "update prompt has only Update now and Later",
+                update_choices == ["Update now", "Later"],
+                ", ".join(update_choices),
+            )
+            if _frozen():
+                check(
+                    "updater helper bundled",
+                    os.path.isfile(os.path.join(os.path.dirname(sys.executable),
+                                                "LogReviewUpdater.exe")),
+                )
             check("bold control removed", not hasattr(app, "bold_var"))
 
             revealed = []

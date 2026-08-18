@@ -10,6 +10,7 @@ its end-to-end self-test.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ OUTPUTS = os.path.join(ROOT, "dist", "windows")
 DIST = OUTPUTS
 WORK = os.path.join(ROOT, "build", "windows")
 ENTRY = os.path.join(HERE, "entry.py")
+UPDATER_ENTRY = os.path.join(HERE, "updater_entry.py")
 APP_NAME = "LogReview"
 SAMPLE_LOGS = os.path.join(ROOT, "data", "raw", "Digitization_TIF_FINAL")
 
@@ -54,6 +56,9 @@ RUN IT
     Existing workbooks are checked and reconciled before they are opened.
     Disposable image pyramids are stored under "cache" beside the executable;
     source images are never modified.
+    LogReview checks public GitHub releases once per day. If a newer version is
+    available, choose Update now or Later. Verified updates preserve review
+    workbooks and caches, then restart the application.
 
 KEYS
     Y / N     has a stamp / has no stamp       1..9  choose a stamp type
@@ -145,6 +150,29 @@ def build() -> tuple[str, list[str]]:
         print(result.stdout[-4000:])
         print(result.stderr[-4000:])
         raise SystemExit("PyInstaller failed")
+
+    updater_work = os.path.join(WORK, "updater")
+    updater_args = [
+        sys.executable, "-m", "PyInstaller", UPDATER_ENTRY,
+        "--name", "LogReviewUpdater",
+        "--noconfirm", "--clean", "--onefile", "--windowed",
+        "--paths", SRC,
+        "--distpath", app_dir,
+        "--workpath", updater_work,
+        "--specpath", updater_work,
+    ]
+    print("$ " + " ".join(updater_args[1:]))
+    updater_result = subprocess.run(
+        updater_args, cwd=ROOT, capture_output=True, text=True, env=env
+    )
+    warnings.extend(
+        line for line in updater_result.stderr.splitlines()
+        if "WARNING" in line or "ERROR" in line
+    )
+    if updater_result.returncode != 0:
+        print(updater_result.stdout[-4000:])
+        print(updater_result.stderr[-4000:])
+        raise SystemExit("Updater PyInstaller build failed")
     return app_dir, warnings
 
 
@@ -171,25 +199,33 @@ def verify(app_dir: str) -> tuple[bool, str]:
     return result.returncode == 0, text
 
 
-def package() -> str:
-    stamp = time.strftime("%Y%m%d")
-    base = os.path.join(OUTPUTS, f"{APP_NAME}_v{VERSION}_{stamp}")
+def package() -> tuple[str, str]:
+    base = os.path.join(OUTPUTS, f"{APP_NAME}_v{VERSION}_windows_x64")
     if os.path.exists(base + ".zip"):
         os.remove(base + ".zip")
     print("zipping…")
-    return shutil.make_archive(base, "zip", root_dir=DIST, base_dir=APP_NAME)
+    archive = shutil.make_archive(base, "zip", root_dir=DIST, base_dir=APP_NAME)
+    digest = hashlib.sha256()
+    with open(archive, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    checksum = archive + ".sha256"
+    with open(checksum, "w", encoding="ascii") as handle:
+        handle.write(f"{digest.hexdigest()}  {os.path.basename(archive)}\n")
+    return archive, checksum
 
 
 def main() -> int:
     app_dir, warnings = build()
     prepare_distribution(app_dir)
     ok, selftest_report = verify(app_dir)
-    zipped = package() if ok else "NOT CREATED"
+    zipped, checksum = package() if ok else ("NOT CREATED", "NOT CREATED")
 
     lines = [
         f"LogReview v{VERSION} build report - {time.strftime('%Y-%m-%d %H:%M')}",
         f"  app folder : {app_dir}  ({_folder_size_mb(app_dir):.0f} MB)",
         f"  zip        : {zipped}",
+        f"  sha256     : {checksum}",
         f"  selftest   : {'PASS' if ok else 'FAIL'}",
         "",
         selftest_report,
