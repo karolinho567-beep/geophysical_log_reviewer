@@ -31,11 +31,12 @@ log-review
 
 Equivalently: `python -m logcv.review` or `python -m logcv review`. All forms accept
 `--in <folder>`, `--xlsx <workbook>`, and `--cache <folder>`. If `--in` is omitted,
-the app explains that it will ask for the image folder, opens the folder chooser,
+the app asks whether to open an image folder or a TXT/CSV/TSV/XLSX image list,
 then offers **Open existing / Create new / Back**. Both workbook browsers start in
 the portable application's `reviews/` directory, which is created automatically.
 File-dialog cancellation returns
-to those choices; backing out shows a welcome screen with **Start review**. After
+to those choices; backing out shows a welcome screen with separate folder and
+image-list choices. After
 the workbook is selected and reconciled, the app asks for the current reviewer.
 Existing workbooks are accepted only when their `review` sheet, required columns,
 and verdict values are valid; filename differences use the reconciliation flow
@@ -132,12 +133,16 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
 - Bundled `log_types.json` — the fixed log classifications offered by the app:
   `Caliper`, `Gamma Ray`, `Porosity`, `Resistivity deep`, `Resistivity medium`,
   `Resistivity shallow`, `Sonic`, and `Spontaneous Potential`.
-- An optional UTF-8 text file containing one 14-digit API per nonblank line for
-  **Evaluate a subset**. Repeated APIs are ignored after their first occurrence.
+- An optional TXT, CSV, TSV, or XLSX image list for startup or **Evaluate a
+  subset**. Headerless TXT files contain one identifier per nonblank line.
+  Structured files contain a numeric identifier column and may contain a TIFF
+  path column. Common `API`/`UWI`/`WELL_ID` and `TIFPATH`/`FILE_PATH`/
+  `IMAGE_PATH` headers are detected case-insensitively; ambiguous files prompt
+  for an explicit column mapping.
 
 ## Steps
 
-1. **Launch** `log-review`, select the image folder, then either open an existing
+1. **Launch** `log-review`, select an image folder or image-list file, then either open an existing
    LogReview workbook or choose the location and name for a new one. Reconcile
    any filename differences, then enter the reviewer name. The most recently
    populated `reviewed_by` value is offered as the default. The app lists every
@@ -158,12 +163,14 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    a committed partial entry, and the toolbar counts
    `reviewed / total` and how many carry a stamp. The `show:` filter narrows the
    list to *to do* or *done*.
-6. **Optionally evaluate a subset.** Click **Evaluate a subset…**, select a text
-   file containing one API per line, review the match summary, and create or
-   replace the workbook's `subset` sheet. Use **whole dataset** and **subset**
-   above the log list to switch scopes. One API includes every TIFF whose name
-   begins with that API. Unmatched valid APIs are reported but are not added;
-   malformed lines stop the import without changing the existing subset.
+6. **Optionally evaluate a subset.** Click **Evaluate a subset…**, select a TXT,
+   CSV, TSV, or XLSX file, review the load summary, and create or replace the
+   workbook's `subset` sheet. Use **whole dataset** and **subset** above the log
+   list to switch scopes. The importer loads every readable TIFF basename for an
+   identifier, preferring the current image collection and falling back to paths
+   listed in the file. Only identifiers with a readable image enter the subset.
+   Cancellation or a failed workbook save leaves the prior subset unchanged. A
+   timestamped row-level audit CSV is written beside the workbook.
 7. **When the sweep is complete**, compare it against the detector's
    `stamp_inventory.csv` (join its `api14` to `log_api`) and promote as described in
    [Outputs](#outputs).
@@ -200,6 +207,11 @@ separate multiple types in the workbook.
   only row; LogReview never guesses that two names represent the same file.
 - **Not yet reviewed ≠ no stamp.** `has_stamp` is left **blank**, never `FALSE`,
   until a person answers. Anything consuming the workbook must filter on that.
+- **Source identifiers are preserved.** `log_api` accepts 1–14 digits as text;
+  values such as `21441` and `22536` are not padded. For matching only, a
+  12-digit identifier also tries the standard trailing-`00` filename form.
+- **`IHS ASSOC IMAGE` is a placeholder, not a path.** It is marked covered when
+  another TIFF loads for the same identifier and unresolved otherwise.
 - **Attribution is latest-editor metadata, not an audit log.** Every successful
   Add/Update writes the active reviewer and local timestamp, replacing any prior
   attribution on that row. Existing untouched legacy rows remain blank.
@@ -255,7 +267,7 @@ near-instant afterward.
 
   | Column (exact order) | Meaning |
   |---|---|
-  | `log_api` | the 14-digit API parsed from the filename; text join key |
+  | `log_api` | supplied 1–14 digit API/well identifier, preserved as text |
   | `file_link` | clickable hyperlink to the image; shows the file name |
   | `has_stamp` | Excel boolean `TRUE` / `FALSE`; **blank = not yet reviewed** |
   | `type_of_stamp` | ordered comma-separated stamp types; blank when `has_stamp` is `FALSE` |
@@ -276,6 +288,10 @@ near-instant afterward.
   rows. The older v1.6/v1.6.1 `position` / `log_api` subset sheet is accepted and
   upgraded on the next successful save.
 - `stamp_types.json` beside the workbook — the type list, as above.
+- `<source>_load_status_<timestamp>.csv` beside the workbook — every input row
+  plus its identifier/path resolution, loaded flags, status, source, and detail.
+  Its summary reports folder loads, listed-path recoveries, duplicates,
+  partial/unrecovered identifiers, and covered/unresolved placeholders.
 - Bundled `log_types.json` — fixed choices maintained with the application.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and
   source identity metadata. Delete them at any time to force regeneration.

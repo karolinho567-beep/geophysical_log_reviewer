@@ -42,6 +42,16 @@ from PIL import ImageTk
 from logcv import __version__
 
 from . import pages
+from .imports import (
+    ColumnSelectionRequired,
+    ImportResult,
+    ManifestError,
+    audit_report_path,
+    load_manifest,
+    resolve_manifest,
+    select_columns,
+    write_audit_csv,
+)
 from .store import (
     COLUMNS,
     InvalidWorkbook,
@@ -96,7 +106,7 @@ def _parse_subset_api_lines(
         value = raw.strip()
         if not value:
             continue
-        if len(value) != 14 or not value.isdigit():
+        if not value.isdigit() or not 1 <= len(value) <= 14:
             invalid.append((line_number, value))
             continue
         if value in seen:
@@ -242,6 +252,9 @@ class ReviewApp(tk.Tk):
         self.all_paths: list[str] = []
         self.paths: list[str] = []  # active whole-dataset or subset view
         self.view_mode = "all"
+        self.source_label: str = ""
+        self.source_manifest: str = ""
+        self._path_identifiers: dict[str, str] = {}
         self.infos: dict[str, pages.PageInfo] = {}
         self.index: int = -1
         self.folder: str = ""
@@ -308,10 +321,10 @@ class ReviewApp(tk.Tk):
 
         ttk.Label(bar, text="Reviewing:", font=("Segoe UI", 9, "bold")
                   ).grid(row=0, column=0, sticky="w")
-        self.folder_var = tk.StringVar(value="no folder open")
+        self.folder_var = tk.StringVar(value="no image source open")
         ttk.Label(bar, textvariable=self.folder_var, foreground="#333"
                   ).grid(row=0, column=1, sticky="w", padx=(6, 0))
-        ttk.Button(bar, text="Change folder…", command=self._pick_folder
+        ttk.Button(bar, text="Change source…", command=self._guided_start
                    ).grid(row=0, column=2, sticky="e", padx=(6, 0))
         self.progress_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.progress_var, font=("Segoe UI", 10, "bold")
@@ -562,8 +575,12 @@ class ReviewApp(tk.Tk):
             wraplength=620,
             justify="center",
         ).pack(pady=(0, 18))
-        ttk.Button(self.welcome, text="Start review…", command=self._pick_folder
-                   ).pack()
+        choices = ttk.Frame(self.welcome)
+        choices.pack()
+        ttk.Button(choices, text="Open image folder…", command=self._pick_folder
+                   ).pack(side="left")
+        ttk.Button(choices, text="Open image list…", command=self._pick_image_list
+                   ).pack(side="left", padx=(8, 0))
 
     def _bind_keys(self) -> None:
         self.bind_all("<Key>", self._on_key)
@@ -579,13 +596,19 @@ class ReviewApp(tk.Tk):
         self.welcome.grid_remove()
 
     def _guided_start(self) -> None:
-        messagebox.showinfo(
+        action = self._choice_dialog(
             "Select geophysical logs",
-            "You will now be prompted to select the folder containing the "
-            "geophysical log images.",
-            parent=self,
+            "Open a folder of images, or a TXT/CSV/TSV/XLSX list containing "
+            "well identifiers and optional TIFF paths.",
+            [("Open image folder…", "folder"),
+             ("Open image list…", "list"),
+             ("Cancel", "cancel")],
+            "cancel",
         )
-        self._pick_folder()
+        if action == "folder":
+            self._pick_folder()
+        elif action == "list":
+            self._pick_image_list()
 
     def _pick_folder(self) -> bool:
         folder = filedialog.askdirectory(title="Folder of scanned logs",
@@ -607,6 +630,144 @@ class ReviewApp(tk.Tk):
             )
             return False
         return self._choose_workbook(folder, found)
+
+    def _manifest_filetypes(self) -> list[tuple[str, str]]:
+        return [
+            ("Image lists", "*.txt *.csv *.tsv *.xlsx"),
+            ("Text list", "*.txt"),
+            ("CSV", "*.csv"),
+            ("Tab-separated", "*.tsv"),
+            ("Excel workbook", "*.xlsx"),
+            ("All files", "*.*"),
+        ]
+
+    def _ask_manifest_columns(self, required: ColumnSelectionRequired):
+        """Return an explicitly mapped table, or ``None`` on cancellation."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Choose image-list columns")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        result = {"table": None}
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Choose the column containing the API/well identifier and the "
+                 "optional column containing TIFF paths.",
+            justify="left", wraplength=560,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        ttk.Label(body, text="Identifier column:").grid(row=1, column=0, sticky="w")
+        id_var = tk.StringVar(value=(required.id_candidates[0]
+                                     if required.id_candidates else ""))
+        id_box = ttk.Combobox(body, textvariable=id_var,
+                              values=list(required.table.headers), state="readonly",
+                              width=38)
+        id_box.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(body, text="TIFF-path column:").grid(row=2, column=0, sticky="w",
+                                                        pady=(8, 0))
+        none_label = "(none)"
+        path_var = tk.StringVar(value=(required.path_candidates[0]
+                                       if required.path_candidates else none_label))
+        path_box = ttk.Combobox(body, textvariable=path_var,
+                                values=[none_label, *required.table.headers],
+                                state="readonly", width=38)
+        path_box.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+        buttons = ttk.Frame(body)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(18, 0))
+
+        def accept() -> None:
+            if not id_var.get():
+                messagebox.showwarning("Identifier required",
+                                       "Select an identifier column.", parent=dialog)
+                return
+            try:
+                result["table"] = select_columns(
+                    required.table, id_var.get(),
+                    None if path_var.get() == none_label else path_var.get(),
+                )
+            except ManifestError as exc:
+                messagebox.showerror("Invalid column selection", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left")
+        ttk.Button(buttons, text="Continue", command=accept).pack(side="left", padx=(8, 0))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        dialog.wait_visibility()
+        id_box.focus_set()
+        self.wait_window(dialog)
+        return result["table"]
+
+    def _load_manifest_interactive(self, source: str):
+        try:
+            return load_manifest(source)
+        except ColumnSelectionRequired as required:
+            return self._ask_manifest_columns(required)
+        except ManifestError as exc:
+            messagebox.showerror("Cannot read image list", f"{source}\n\n{exc}",
+                                 parent=self)
+            return None
+
+    def _pick_image_list(self) -> bool:
+        source = filedialog.askopenfilename(
+            title="Select an image list or manifest",
+            filetypes=self._manifest_filetypes(),
+            initialdir=self.folder or os.getcwd(), parent=self,
+        )
+        if not source:
+            if not self.all_paths:
+                self._show_welcome()
+            return False
+        table = self._load_manifest_interactive(source)
+        if table is None:
+            return False
+        folder = ""
+        folder_images: list[str] = []
+        if not table.has_paths:
+            folder = filedialog.askdirectory(
+                title="Folder containing images for this identifier list",
+                initialdir=os.path.dirname(source), parent=self,
+            )
+            if not folder:
+                return False
+            try:
+                folder_images = pages.list_images(folder)
+            except OSError as exc:
+                messagebox.showerror("Cannot read folder", str(exc), parent=self)
+                return False
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            result = resolve_manifest(table, folder_images)
+        finally:
+            self.configure(cursor="")
+        if not result.paths:
+            report = audit_report_path(source, os.path.join(_default_reviews_dir(),
+                                                             "review.xlsx"))
+            try:
+                write_audit_csv(report, result)
+            except OSError:
+                report = "(audit report could not be written)"
+            messagebox.showwarning(
+                "No readable images", result.stats.summary() + f"\n\nAudit CSV: {report}",
+                parent=self,
+            )
+            return False
+        action = self._choice_dialog(
+            "Open image-list review", result.stats.summary(),
+            [("Continue", "continue"), ("Cancel", "cancel")], "cancel",
+        )
+        if action != "continue":
+            return False
+        source_root = folder or os.path.dirname(os.path.abspath(source))
+        return self._choose_workbook(
+            source_root, result.paths,
+            source_name=os.path.splitext(os.path.basename(source))[0],
+            opener=lambda workbook: self._open_import_result(result, workbook,
+                                                               source_root),
+        )
 
     def _choice_dialog(
         self, title: str, message: str, choices: list[tuple[str, str]], cancel: str
@@ -649,9 +810,10 @@ class ReviewApp(tk.Tk):
             "back",
         )
 
-    def _choose_workbook(self, folder: str, images: list[str]) -> bool:
+    def _choose_workbook(self, folder: str, images: list[str],
+                         source_name: str | None = None, opener=None) -> bool:
         """Recoverable Existing/New/Back workflow; file-dialog cancel loops here."""
-        default = _default_workbook(folder)
+        default = _default_workbook(folder, source_name)
         default_dir = os.path.dirname(default)
         try:
             os.makedirs(default_dir, exist_ok=True)
@@ -705,13 +867,22 @@ class ReviewApp(tk.Tk):
                         parent=self,
                     )
                     continue
-            if self.open_folder(folder, path):
+            open_selected = opener or (lambda selected: self.open_folder(folder, selected))
+            if open_selected(path):
                 return True
 
     def _pick_workbook(self) -> None:
-        if not self.folder:
+        if not self.all_paths:
             return
-        self._choose_workbook(self.folder, self.all_paths)
+        current_paths = list(self.all_paths)
+        identifiers = dict(self._path_identifiers)
+        label = self.source_label or os.path.basename(self.folder)
+        self._choose_workbook(
+            self.folder or os.getcwd(), current_paths, source_name=label,
+            opener=lambda workbook: self._open_resolved_source(
+                current_paths, workbook, self.folder or os.getcwd(), label, identifiers
+            ),
+        )
 
     def _prompt_reviewer(self, default: str = "") -> str | None:
         while True:
@@ -851,13 +1022,47 @@ class ReviewApp(tk.Tk):
             messagebox.showwarning("Nothing to review",
                                    f"No images ({', '.join(pages.IMAGE_EXTS)}) in\n{folder}")
             return False
+        identifiers = {
+            os.path.normcase(os.path.abspath(path)): pages.api14_from_name(path)
+            for path in found
+        }
+        return self._open_resolved_source(
+            found, workbook, os.path.abspath(folder), os.path.basename(folder), identifiers
+        )
+
+    def _open_import_result(self, result: ImportResult, workbook: str,
+                            source_root: str) -> bool:
+        label = os.path.splitext(os.path.basename(result.source.source_path))[0]
+        if not self._open_resolved_source(
+            result.paths, workbook, source_root, label, result.path_identifiers
+        ):
+            return False
+        self.source_manifest = result.source.source_path
+        report = audit_report_path(result.source.source_path, self.store.path)
+        try:
+            write_audit_csv(report, result)
+        except OSError as exc:
+            messagebox.showwarning(
+                "Review opened; audit CSV failed",
+                f"The images were opened, but the audit CSV could not be written.\n\n{exc}",
+                parent=self,
+            )
+        else:
+            self.status_var.set(
+                f"Loaded {result.stats.loaded_tiffs} TIFF(s) from "
+                f"{result.stats.loaded_identifiers} identifier(s). Audit: {report}"
+            )
+        return True
+
+    def _open_resolved_source(self, found: list[str], workbook: str | None,
+                              source_root: str, source_label: str,
+                              identifiers: dict[str, str]) -> bool:
+        """Open an already resolved folder or manifest image collection."""
         if self.index >= 0 and not self._resolve_pending_draft():
             return False
 
-        # A folder owns its own default workbook. Reusing the previous folder's
-        # workbook here would silently mix two review corpora after "Change folder".
-        folder_abs = os.path.abspath(folder)
-        book = workbook or _default_workbook(folder_abs)
+        root_abs = os.path.abspath(source_root)
+        book = workbook or _default_workbook(root_abs, source_label)
         if os.path.exists(book):
             try:
                 inspection = validate_review_workbook(
@@ -885,8 +1090,11 @@ class ReviewApp(tk.Tk):
 
         # Commit the switch only after both inputs have been checked. A rejected
         # workbook must leave the currently open review completely untouched.
-        self.folder = folder_abs
-        self.all_paths = found
+        self.folder = root_abs
+        self.source_label = source_label
+        self.source_manifest = ""
+        self._path_identifiers = dict(identifiers)
+        self.all_paths = list(found)
         self.paths = list(found)
         self.view_mode = "all"
         self.scope_var.set("all")
@@ -896,8 +1104,12 @@ class ReviewApp(tk.Tk):
         self.reviewer = reviewer
         self.reviewer_var.set(reviewer)
         for path in self.all_paths:  # seed rows so the workbook lists every file
-            self.store.record_for(path, pages.api14_from_name(path))
-        self.folder_var.set(f"{self.folder}   ({len(self.all_paths)} images)")
+            key = os.path.normcase(os.path.abspath(path))
+            log_id = identifiers.get(key) or pages.api14_from_name(path)
+            record = self.store.record_for(path, log_id)
+            if identifiers.get(key):
+                record.api14 = log_id
+        self.folder_var.set(f"{source_label}   ({len(self.all_paths)} images)")
         self.workbook_var.set(self.store.path)
         self.saved_var.set("saved earlier" if os.path.exists(self.store.path)
                            else "not saved yet")
@@ -910,7 +1122,7 @@ class ReviewApp(tk.Tk):
         self._update_stamp_choices()
         self._refresh_scope_controls()
 
-        self.title(f"Geophysical Log Reviewer - {os.path.basename(self.folder)}")
+        self.title(f"Geophysical Log Reviewer - {source_label}")
         self._hide_welcome()
         self._refresh_list()
         first = self._first_unreviewed()
@@ -934,7 +1146,19 @@ class ReviewApp(tk.Tk):
         if self.store is None or not self.store.subset_apis:
             return []
         wanted = set(self.store.subset_apis)
-        return [path for path in self.all_paths if self._leading_api(path) in wanted]
+        out: list[str] = []
+        for path in self.all_paths:
+            name = os.path.basename(path)
+            record = self.store.records.get(name)
+            if record is None:
+                record = next(
+                    (value for key, value in self.store.records.items()
+                     if key.casefold() == name.casefold()), None
+                )
+            identifier = record.api14 if record else self._leading_api(path)
+            if identifier in wanted:
+                out.append(path)
+        return out
 
     def _refresh_scope_controls(self) -> None:
         requested = len(self.store.subset_apis) if self.store is not None else 0
@@ -991,7 +1215,7 @@ class ReviewApp(tk.Tk):
         return True
 
     def _evaluate_subset(self) -> None:
-        """Import one API per line, save membership, and enter subset mode."""
+        """Import identifiers/paths, save resolved membership, and enter subset mode."""
         if self.store is None or not self.all_paths:
             messagebox.showwarning(
                 "No review is open",
@@ -1002,71 +1226,37 @@ class ReviewApp(tk.Tk):
         if not self._resolve_pending_draft():
             return
         source = filedialog.askopenfilename(
-            title="Select a text file containing one API number per line",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Select an identifier list or TIFF manifest",
+            filetypes=self._manifest_filetypes(),
             initialdir=self.folder or os.getcwd(),
             parent=self,
         )
         if not source:
             return
+        table = self._load_manifest_interactive(source)
+        if table is None:
+            return
+        self.configure(cursor="watch")
+        self.update_idletasks()
         try:
-            with open(source, encoding="utf-8-sig") as handle:
-                raw_lines = handle.read().splitlines()
-        except (OSError, UnicodeError) as exc:
-            messagebox.showerror("Cannot read API list", f"{source}\n\n{exc}", parent=self)
-            return
-
-        requested, duplicates, invalid = _parse_subset_api_lines(raw_lines)
-        if invalid:
-            shown = "\n".join(
-                f"Line {line}: {value}" for line, value in invalid[:10]
-            )
-            if len(invalid) > 10:
-                shown += f"\n…and {len(invalid) - 10} more"
-            messagebox.showerror(
-                "Invalid API list",
-                "Each nonblank line must contain exactly one 14-digit API number.\n\n"
-                + shown,
+            result = resolve_manifest(table, self.all_paths)
+        finally:
+            self.configure(cursor="")
+        if not result.paths:
+            report = audit_report_path(source, self.store.path)
+            try:
+                write_audit_csv(report, result)
+            except OSError as exc:
+                report = f"not written ({exc})"
+            messagebox.showwarning(
+                "No readable images",
+                result.stats.summary() +
+                f"\n\nThe existing subset was not changed.\nAudit CSV: {report}",
                 parent=self,
             )
             return
-        if not requested:
-            messagebox.showwarning(
-                "Empty API list", "The selected file contains no API numbers.", parent=self
-            )
-            return
-
-        requested_set = set(requested)
-        matched_paths = [
-            path for path in self.all_paths if self._leading_api(path) in requested_set
-        ]
-        matched_apis = {self._leading_api(path) for path in matched_paths}
-        unmatched = [api for api in requested if api not in matched_apis]
-        if not matched_paths:
-            messagebox.showwarning(
-                "No matching logs",
-                "None of the requested APIs match the beginning of a loaded TIFF filename. "
-                "The existing subset was not changed.",
-                parent=self,
-            )
-            return
-
-        summary = (
-            f"Requested APIs: {len(requested)}\n"
-            f"Matched APIs: {len(matched_apis)}\n"
-            f"Matched TIFFs: {len(matched_paths)}\n"
-            f"Unmatched APIs not included in the subset: {len(unmatched)}\n"
-            f"Duplicate lines ignored: {duplicates}"
-        )
-        if unmatched:
-            summary += "\n\nUnmatched:\n" + "\n".join(
-                f"  {api}" for api in unmatched[:8]
-            )
-            if len(unmatched) > 8:
-                summary += f"\n  …and {len(unmatched) - 8} more"
         action = self._choice_dialog(
-            "Create evaluation subset",
-            summary,
+            "Create evaluation subset", result.stats.summary(),
             [(
                 "Replace subset" if self.store.subset_apis else "Create subset",
                 "continue",
@@ -1078,16 +1268,46 @@ class ReviewApp(tk.Tk):
 
         old_subset = list(self.store.subset_apis)
         old_dirty = self.store.dirty
-        self.store.replace_subset(requested)
+        old_paths = list(self.all_paths)
+        old_identifiers = dict(self._path_identifiers)
+        old_record_ids = {name: record.api14 for name, record in self.store.records.items()}
+        existing_keys = {os.path.normcase(os.path.abspath(path)) for path in self.all_paths}
+        for path in result.paths:
+            key = os.path.normcase(os.path.abspath(path))
+            identifier = result.path_identifiers[key]
+            self._path_identifiers[key] = identifier
+            if key not in existing_keys:
+                self.all_paths.append(path)
+                existing_keys.add(key)
+            self.store.record_for(path, identifier).api14 = identifier
+        self.store.replace_subset(result.loaded_identifiers)
         if not self._save_store(quiet=True):
             self.store.subset_apis = old_subset
             self.store.dirty = old_dirty
+            self.all_paths = old_paths
+            self._path_identifiers = old_identifiers
+            for name in list(self.store.records):
+                if name not in old_record_ids:
+                    self.store.records.pop(name)
+                else:
+                    self.store.records[name].api14 = old_record_ids[name]
             self._refresh_scope_controls()
             return
+        report = audit_report_path(source, self.store.path)
+        try:
+            write_audit_csv(report, result)
+        except OSError as exc:
+            messagebox.showwarning(
+                "Subset saved; audit CSV failed",
+                f"The subset was saved, but the audit CSV could not be written.\n\n{exc}",
+                parent=self,
+            )
+            report = "not written"
         self._refresh_scope_controls()
         self._switch_scope("subset")
         self.status_var.set(
-            f"Evaluating {len(matched_paths)} TIFF(s) from {len(matched_apis)} API(s)."
+            f"Evaluating {result.stats.loaded_tiffs} TIFF(s) from "
+            f"{result.stats.loaded_identifiers} identifier(s). Audit: {report}"
         )
 
     # ----------------------------------------------------------------- list
@@ -1216,7 +1436,7 @@ class ReviewApp(tk.Tk):
             f"[{index + 1}/{len(self.paths)}]  {info.name}   "
             f"{info.width} x {info.height} px   {width_in:.1f} x {height_in:.1f} in "
             f"@ {info.dpi:g} dpi   {info.megapixels:.0f} MP"
-            + (f"   API {info.api14}" if info.api14 else "")
+            + (f"   API/well ID {record.api14}" if record.api14 else "")
         )
         self.vy = 0.0  # a new page opens at its header, where the stamp usually is
         self.fit_width()
@@ -2039,10 +2259,11 @@ def _default_folder() -> str | None:
     return None
 
 
-def _default_workbook(folder: str) -> str:
+def _default_workbook(folder: str, source_name: str | None = None) -> str:
     """Where verdicts go by default. Never beside the images -- `data/raw/` is
     read-only, and a packaged copy may be pointed at a read-only share."""
-    base = os.path.basename(os.path.normpath(folder)) or "logs"
+    base = source_name or os.path.basename(os.path.normpath(folder)) or "logs"
+    base = os.path.splitext(os.path.basename(base))[0] or "logs"
     return os.path.join(_default_reviews_dir(), f"{base}_stamp_review.xlsx")
 
 

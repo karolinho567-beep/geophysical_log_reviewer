@@ -30,7 +30,7 @@ SHEET = "review"
 SUBSET_SHEET = "subset"
 #: Review header row, in order.
 COLUMNS = [
-    "log_api",        # 14-digit API parsed from the file name
+    "log_api",        # source API/well identifier, stored as text (1-14 digits)
     "file_link",      # hyperlink to the image, shows the file name
     "has_stamp",      # TRUE / FALSE / blank when not yet reviewed
     "type_of_stamp",  # comma-separated stamp types; blank when FALSE
@@ -64,6 +64,12 @@ DEFAULT_LOG_TYPES = [
 
 _TRUE = {"true", "yes", "y", "1", "t"}
 _FALSE = {"false", "no", "n", "0", "f"}
+
+
+def valid_log_identifier(value: object) -> bool:
+    """Whether ``value`` is a supported source API/well identifier."""
+    text = str(value or "").strip()
+    return text.isdigit() and 1 <= len(text) <= 14
 
 
 class WorkbookLocked(OSError):
@@ -201,9 +207,9 @@ def _read_subset_apis(sheet) -> list[str]:
         name = str(row[header["file_link"]] or "").strip()
         if not api and not name and not any(value not in (None, "") for value in row):
             continue
-        if len(api) != 14 or not api.isdigit():
+        if not valid_log_identifier(api):
             raise InvalidWorkbook(
-                f"Subset row {row_number} must contain a 14-digit log_api."
+                f"Subset row {row_number} must contain a 1-14 digit log_api."
             )
         if not name:
             raise InvalidWorkbook(f"Subset row {row_number} has no file_link value.")
@@ -244,9 +250,9 @@ def _read_legacy_subset_apis(rows, header: dict[str, int]) -> list[str]:
             raise InvalidWorkbook(
                 f"Subset row {row_number} has a duplicate or invalid position."
             )
-        if len(api) != 14 or not api.isdigit() or api in seen_apis:
+        if not valid_log_identifier(api) or api in seen_apis:
             raise InvalidWorkbook(
-                f"Subset row {row_number} must contain a unique 14-digit log_api."
+                f"Subset row {row_number} must contain a unique 1-14 digit log_api."
             )
         seen_positions.add(position)
         seen_apis.add(api)
@@ -474,8 +480,10 @@ class ReviewStore:
         seen: set[str] = set()
         for value in api_numbers:
             api = str(value).strip()
-            if len(api) != 14 or not api.isdigit():
-                raise ValueError(f"Subset API must contain exactly 14 digits: {value!r}")
+            if not valid_log_identifier(api):
+                raise ValueError(
+                    f"Subset identifier must contain 1 to 14 digits: {value!r}"
+                )
             if api not in seen:
                 ordered.append(api)
                 seen.add(api)

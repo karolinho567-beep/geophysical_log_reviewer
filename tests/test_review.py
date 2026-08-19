@@ -404,10 +404,26 @@ def test_malformed_subset_sheet_is_rejected(tmp_path):
         validate_review_workbook(str(book), {"a.tif"})
 
 
-def test_subset_rejects_invalid_api_values(tmp_path):
+def test_subset_accepts_short_ids_and_rejects_invalid_values(tmp_path):
     store = ReviewStore(str(tmp_path / "review.xlsx"))
-    with pytest.raises(ValueError, match="exactly 14 digits"):
-        store.replace_subset(["42175"])
+    store.replace_subset(["21441", "22536"])
+    assert store.subset_apis == ["21441", "22536"]
+    with pytest.raises(ValueError, match="1 to 14 digits"):
+        store.replace_subset(["not-an-api"])
+    with pytest.raises(ValueError, match="1 to 14 digits"):
+        store.replace_subset(["123456789012345"])
+
+
+def test_short_identifier_round_trips_through_review_and_subset(tmp_path):
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.record_for(str(tmp_path / "21441_RES.tif"), "21441")
+    store.replace_subset(["21441"])
+    store.save(["21441_RES.tif"])
+    loaded = ReviewStore(str(book))
+    assert loaded.load() == 1
+    assert loaded.records["21441_RES.tif"].api14 == "21441"
+    assert loaded.subset_apis == ["21441"]
 
 
 def test_remove_records_supports_reconciliation_rollback(tmp_path):
@@ -492,9 +508,9 @@ def test_subset_api_matching_requires_a_leading_14_digit_number():
     assert ReviewApp._leading_api("421750007200001-log.tif") == ""
 
     requested, duplicates, invalid = _parse_subset_api_lines([
-        "42175000720000", "", " 42175001200000 ", "42175000720000", "API",
+        "42175000720000", "", " 21441 ", "42175000720000", "API",
     ])
-    assert requested == ["42175000720000", "42175001200000"]
+    assert requested == ["42175000720000", "21441"]
     assert duplicates == 1
     assert invalid == [(5, "API")]
 

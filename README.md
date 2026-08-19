@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.6.2**
+Current version: **1.7.0**
 
 ## Features
 
@@ -16,6 +16,10 @@ Current version: **1.6.2**
   fixed log classifications, notes, timestamps, and reviewer attribution.
 - Displays notes in the log list and supports a persistent API-based subset view
   without duplicating review answers.
+- Opens review collections from TXT, CSV, TSV, or XLSX lists, preserves short
+  well identifiers, and recovers TIFFs from paths recorded in those files.
+- Writes row-level import audits and load statistics, including missing images
+  and covered or unresolved `IHS ASSOC IMAGE` placeholders.
 - Reconciles an existing workbook with a changed TIFF folder while protecting the
   original workbook and preserving optional out-of-folder rows.
 - Migrates compatible v1.2 and v1.3 workbooks to the current nine-column schema.
