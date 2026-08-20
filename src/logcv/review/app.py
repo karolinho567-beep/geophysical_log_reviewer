@@ -493,6 +493,10 @@ class ReviewApp(tk.Tk):
         self.add_stamp_button.pack(side="left")
         ttk.Button(stamp_actions, text="+ Add stamp type…", command=self._add_type
                    ).pack(side="left", padx=(6, 0))
+        self.manage_stamp_types_button = ttk.Button(
+            stamp_actions, text="Manage stamp types…", command=self._manage_types
+        )
+        self.manage_stamp_types_button.pack(side="left", padx=(6, 0))
 
         ttk.Label(workflow, text="→", font=("Segoe UI", 20, "bold"),
                   foreground="#1a5c2f").grid(row=0, column=1)
@@ -1848,6 +1852,206 @@ class ReviewApp(tk.Tk):
                 target["var"].set(name)
                 self._on_stamp_selected(target)
 
+    def _manage_types(self) -> None:
+        """Rename or remove catalog values and all workbook uses atomically."""
+        if self.store is None or not self._resolve_pending_draft():
+            return
+        dialog = tk.Toplevel(self)
+        dialog.title("Manage stamp types")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Rename a stamp type to correct it everywhere, or remove it from "
+                 "the catalog and saved review entries.",
+            justify="left", wraplength=520,
+        ).pack(anchor="w", pady=(0, 10))
+        type_list = tk.Listbox(body, width=48, height=max(5, min(12, len(self.types))),
+                               exportselection=False)
+        type_list.pack(fill="both", expand=True)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(12, 0))
+
+        def refresh(selected: str = "") -> None:
+            type_list.delete(0, "end")
+            selected_index = 0
+            for index, value in enumerate(self.types):
+                type_list.insert("end", value)
+                if value.casefold() == selected.casefold():
+                    selected_index = index
+            if self.types:
+                type_list.selection_set(selected_index)
+                type_list.see(selected_index)
+
+        def selected_type() -> str:
+            selection = type_list.curselection()
+            return self.types[selection[0]] if selection else ""
+
+        def rename() -> None:
+            old = selected_type()
+            if not old:
+                return
+            new = simpledialog.askstring(
+                "Rename stamp type", "New name:", initialvalue=old, parent=dialog
+            )
+            if new is None:
+                return
+            new = new.strip()
+            if not new or "," in new:
+                messagebox.showerror(
+                    "Invalid stamp type",
+                    "Stamp type names must be nonblank and cannot contain commas.",
+                    parent=dialog,
+                )
+                return
+            existing = next(
+                (value for value in self.types
+                 if value.casefold() == new.casefold() and value != old), None
+            )
+            if existing is not None:
+                if not messagebox.askyesno(
+                    "Merge stamp types",
+                    f"{existing!r} already exists. Replace every use of {old!r} "
+                    f"with {existing!r} and merge the two catalog entries?",
+                    parent=dialog,
+                ):
+                    return
+                new = existing
+            if new == old:
+                return
+            if self._apply_stamp_type_change(old, new):
+                refresh(new)
+
+        def remove() -> None:
+            old = selected_type()
+            if not old:
+                return
+            if len(self.types) <= 1:
+                messagebox.showwarning(
+                    "Cannot remove the only type",
+                    "At least one stamp type must remain. Rename this type instead.",
+                    parent=dialog,
+                )
+                return
+            affected = 0
+            incomplete = 0
+            old_key = old.casefold()
+            for record in self.store.records.values():
+                values = split_values(record.stamp_type)
+                if old_key not in {value.casefold() for value in values}:
+                    continue
+                affected += 1
+                remaining = [value for value in values if value.casefold() != old_key]
+                if record.reviewed and record.has_stamp is True and not remaining:
+                    incomplete += 1
+            warning = (
+                f"Remove {old!r} from the stamp-type catalog and {affected} saved "
+                f"review entr{'y' if affected == 1 else 'ies'}?"
+            )
+            if incomplete:
+                warning += (
+                    f"\n\n{incomplete} entry/entries will become incomplete because "
+                    "they will still say YES but have no stamp type."
+                )
+            if not messagebox.askyesno("Remove stamp type", warning, parent=dialog):
+                return
+            if self._apply_stamp_type_change(old, ""):
+                refresh()
+
+        ttk.Button(buttons, text="Rename…", command=rename).pack(side="left")
+        ttk.Button(buttons, text="Remove…", command=remove).pack(side="left", padx=(7, 0))
+        ttk.Button(buttons, text="Close", command=dialog.destroy).pack(side="right")
+        refresh()
+        type_list.bind("<Double-Button-1>", lambda _event: rename())
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        dialog.wait_visibility()
+        type_list.focus_set()
+        self.wait_window(dialog)
+
+    def _stamp_type_backup(self) -> str:
+        if self.store is None or not os.path.exists(self.store.path):
+            return ""
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        root, extension = os.path.splitext(self.store.path)
+        backup = f"{root}.pre_stamp_types_{stamp}{extension}"
+        suffix = 2
+        while os.path.exists(backup):
+            backup = f"{root}.pre_stamp_types_{stamp}_{suffix}{extension}"
+            suffix += 1
+        shutil.copy2(self.store.path, backup)
+        return backup
+
+    def _apply_stamp_type_change(self, old: str, new: str) -> bool:
+        """Persist one global rename/removal, restoring memory/JSON on failure."""
+        old_types = list(self.types)
+        old_dirty = self.store.dirty
+        record_snapshot = {
+            name: (record.stamp_type, record.reviewed_at, record.reviewed_by)
+            for name, record in self.store.records.items()
+        }
+        old_key = old.casefold()
+        if new and new.casefold() == old_key:
+            target = new
+        else:
+            target = next((value for value in self.types
+                           if value.casefold() == new.casefold()), new) if new else ""
+        updated_types: list[str] = []
+        for value in self.types:
+            if value.casefold() == old_key:
+                if target and target.casefold() not in {
+                    item.casefold() for item in updated_types
+                }:
+                    updated_types.append(target)
+            elif value.casefold() not in {item.casefold() for item in updated_types}:
+                updated_types.append(value)
+        if target and target.casefold() not in {value.casefold() for value in updated_types}:
+            updated_types.append(target)
+
+        types_file = stamp_types_path(self.store.path)
+        backup = ""
+        try:
+            backup = self._stamp_type_backup()
+            self.types = updated_types
+            changed, incomplete = self.store.replace_stamp_type(
+                old, target, self.reviewer
+            )
+            save_stamp_types(types_file, self.types)
+            if not self._save_store(quiet=True):
+                raise OSError("The review workbook could not be saved.")
+        except Exception as exc:
+            self.types = old_types
+            for name, values in record_snapshot.items():
+                record = self.store.records[name]
+                record.stamp_type, record.reviewed_at, record.reviewed_by = values
+            self.store.dirty = old_dirty
+            try:
+                save_stamp_types(types_file, old_types)
+            except OSError:
+                pass
+            self._update_stamp_choices()
+            messagebox.showerror(
+                "Could not update stamp types",
+                f"The stamp-type change was rolled back.\n\n{exc}", parent=self,
+            )
+            return False
+
+        self._update_stamp_choices()
+        if self.current_record is not None:
+            self._load_entry_draft(self.current_record)
+        self._refresh_list()
+        action = "Removed" if not target else f"Renamed to {target!r} in"
+        detail = f"{action} {changed} saved review entr{'y' if changed == 1 else 'ies'}."
+        if incomplete:
+            detail += f" {incomplete} entry/entries are now incomplete."
+        if backup:
+            detail += f" Backup: {backup}"
+        self.status_var.set(detail)
+        return True
+
     def _on_draft_changed(self, *_args) -> None:
         if not self._loading_draft:
             self._refresh_submission_state()
@@ -2326,6 +2530,8 @@ def selftest(folder: str | None = None) -> int:
             )
             check("folder listed", bool(app.paths), f"{len(app.paths)} images")
             check("notes column visible", "notes" in app.tree["columns"])
+            check("stamp types can be managed",
+                  app.manage_stamp_types_button.winfo_exists() == 1)
             check("page opened", app.current_path is not None,
                   os.path.basename(app.current_path or ""))
             check("page rendered", app._photo is not None,

@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.7.0**
+Current version: **1.7.1**
 
 ## Features
 
@@ -14,6 +14,8 @@ Current version: **1.7.0**
 - Fast zooming and scrolling through persistent reduced-resolution tile caches.
 - Explicit draft-and-commit workflow for stamp verdicts, multiple stamp types,
   fixed log classifications, notes, timestamps, and reviewer attribution.
+- Renames or removes custom stamp types across the catalog and every affected
+  saved review row, with confirmation, rollback, and workbook backups.
 - Displays notes in the log list and supports a persistent API-based subset view
   without duplicating review answers.
 - Opens review collections from TXT, CSV, TSV, or XLSX lists, preserves short

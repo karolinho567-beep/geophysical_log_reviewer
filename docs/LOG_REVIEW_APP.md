@@ -189,6 +189,21 @@ already used in the workbook are merged in on load, so a workbook edited by hand
 in Excel never loses a type. A stamp type cannot contain a comma because commas
 separate multiple types in the workbook.
 
+### Renaming or removing a stamp type
+
+Click **Manage stamp types…**, select a type, then choose **Rename…** or
+**Remove…**. Rename updates the catalog and every saved review row containing
+that value. Renaming to an existing type merges the two values and removes any
+per-row duplicate. Remove deletes the type from both the catalog and affected
+rows after showing how many entries will change. A `YES` row whose only type is
+removed becomes incomplete and returns to the to-do workflow.
+
+Both operations save immediately. Pending edits on the current log must first be
+saved or discarded. Before changing an existing workbook, LogReview writes a
+sibling backup named like `review.pre_stamp_types_20260820_101500.xlsx`. A locked
+workbook or failed JSON/workbook write rolls the in-memory catalog and records
+back to their prior state.
+
 ## Assumptions
 
 - **A page gets one stamp verdict but may list several distinct stamp types.**

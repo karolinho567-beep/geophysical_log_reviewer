@@ -485,6 +485,34 @@ def test_adding_a_type_survives_a_round_trip_and_de_duplicates(tmp_path):
     assert load_stamp_types(path) == ["IHS", "TWDB", "Riley"]
 
 
+def test_stamp_type_rename_updates_all_records_and_merges_existing_type(tmp_path):
+    store = ReviewStore(str(tmp_path / "review.xlsx"))
+    first = store.record_for(str(tmp_path / "a.tif"))
+    first.set_verdict(True, "IHSS")
+    second = store.record_for(str(tmp_path / "b.tif"))
+    second.set_verdict(True, "TWDB, IHSS")
+    changed, incomplete = store.replace_stamp_type("ihss", "IHS", "KP")
+    assert (changed, incomplete) == (2, 0)
+    assert first.stamp_type == "IHS"
+    assert second.stamp_type == "TWDB, IHS"
+    assert first.reviewed_by == "KP"
+    assert store.dirty
+
+
+def test_removing_last_type_from_yes_record_makes_it_incomplete(tmp_path):
+    store = ReviewStore(str(tmp_path / "review.xlsx"))
+    only = store.record_for(str(tmp_path / "a.tif"))
+    only.set_verdict(True, "Typo")
+    remaining = store.record_for(str(tmp_path / "b.tif"))
+    remaining.set_verdict(True, "Typo, IHS")
+    changed, incomplete = store.replace_stamp_type("Typo", reviewed_by="KP")
+    assert (changed, incomplete) == (2, 1)
+    assert only.stamp_type == ""
+    assert only.incomplete
+    assert remaining.stamp_type == "IHS"
+    assert remaining.reviewed
+
+
 def test_fixed_log_types_are_loaded_from_the_bundled_json():
     assert load_log_types() == DEFAULT_LOG_TYPES
     assert DEFAULT_LOG_TYPES == [

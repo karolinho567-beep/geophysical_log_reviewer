@@ -444,6 +444,38 @@ class ReviewStore:
                 found.setdefault(value.casefold(), value)
         return sorted(found.values(), key=str.casefold)
 
+    def replace_stamp_type(self, old: str, new: str = "",
+                           reviewed_by: str = "") -> tuple[int, int]:
+        """Rename or remove a stamp type in every record.
+
+        Returns ``(changed records, records made incomplete)``. Replacing with
+        an existing type intentionally merges duplicates within each record.
+        """
+        old_key = str(old).strip().casefold()
+        replacement = str(new).strip()
+        if not old_key:
+            return 0, 0
+        changed = 0
+        made_incomplete = 0
+        edited_at = _dt.datetime.now().replace(microsecond=0).isoformat(sep=" ")
+        for record in self.records.values():
+            values = split_values(record.stamp_type)
+            if old_key not in {value.casefold() for value in values}:
+                continue
+            was_reviewed = record.reviewed
+            replaced = [replacement if value.casefold() == old_key else value
+                        for value in values]
+            record.stamp_type = join_values(value for value in replaced if value)
+            record.reviewed_at = edited_at
+            if reviewed_by:
+                record.reviewed_by = reviewed_by
+            changed += 1
+            if was_reviewed and not record.reviewed:
+                made_incomplete += 1
+        if changed:
+            self.dirty = True
+        return changed, made_incomplete
+
     def counts(self, names: list[str] | None = None) -> tuple[int, int, int]:
         """(reviewed, with a stamp, incomplete)."""
         if names is None:
