@@ -26,6 +26,7 @@ Keyboard (the point of the whole thing -- 70 pages by mouse is a bad afternoon):
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import os
 import queue
 import shutil
@@ -44,6 +45,7 @@ from logcv import __version__
 from . import pages
 from .imports import (
     ColumnSelectionRequired,
+    DepthFilter,
     ImportResult,
     ManifestError,
     audit_report_path,
@@ -255,6 +257,7 @@ class ReviewApp(tk.Tk):
         self.source_label: str = ""
         self.source_manifest: str = ""
         self._path_identifiers: dict[str, str] = {}
+        self._path_locations: dict[str, dict[str, str]] = {}
         self.infos: dict[str, pages.PageInfo] = {}
         self.index: int = -1
         self.folder: str = ""
@@ -656,8 +659,8 @@ class ReviewApp(tk.Tk):
         body.pack(fill="both", expand=True)
         ttk.Label(
             body,
-            text="Choose the column containing the API/well identifier and the "
-                 "optional column containing TIFF paths.",
+            text="Choose the API/well identifier and any optional TIFF path, "
+                 "location, and depth columns.",
             justify="left", wraplength=560,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
         ttk.Label(body, text="Identifier column:").grid(row=1, column=0, sticky="w")
@@ -667,17 +670,27 @@ class ReviewApp(tk.Tk):
                               values=list(required.table.headers), state="readonly",
                               width=38)
         id_box.grid(row=1, column=1, sticky="ew", padx=(10, 0))
-        ttk.Label(body, text="TIFF-path column:").grid(row=2, column=0, sticky="w",
-                                                        pady=(8, 0))
+        optional_boxes: dict[str, tk.StringVar] = {}
+        optional_specs = [
+            ("TIFF-path column:", "path", required.path_candidates),
+            ("Latitude column:", "latitude", required.latitude_candidates),
+            ("Longitude column:", "longitude", required.longitude_candidates),
+            ("Depth column:", "depth", required.depth_candidates),
+        ]
         none_label = "(none)"
-        path_var = tk.StringVar(value=(required.path_candidates[0]
-                                       if required.path_candidates else none_label))
-        path_box = ttk.Combobox(body, textvariable=path_var,
-                                values=[none_label, *required.table.headers],
-                                state="readonly", width=38)
-        path_box.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+        for row_index, (label, key, candidates) in enumerate(optional_specs, start=2):
+            ttk.Label(body, text=label).grid(
+                row=row_index, column=0, sticky="w", pady=(8, 0)
+            )
+            value = candidates[0] if len(candidates) == 1 else none_label
+            variable = tk.StringVar(value=value)
+            optional_boxes[key] = variable
+            ttk.Combobox(
+                body, textvariable=variable, values=[none_label, *required.table.headers],
+                state="readonly", width=38,
+            ).grid(row=row_index, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
         buttons = ttk.Frame(body)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(18, 0))
 
         def accept() -> None:
             if not id_var.get():
@@ -687,7 +700,11 @@ class ReviewApp(tk.Tk):
             try:
                 result["table"] = select_columns(
                     required.table, id_var.get(),
-                    None if path_var.get() == none_label else path_var.get(),
+                    *(
+                        None if optional_boxes[key].get() == none_label
+                        else optional_boxes[key].get()
+                        for key in ("path", "latitude", "longitude", "depth")
+                    ),
                 )
             except ManifestError as exc:
                 messagebox.showerror("Invalid column selection", str(exc), parent=dialog)
@@ -704,15 +721,98 @@ class ReviewApp(tk.Tk):
         self.wait_window(dialog)
         return result["table"]
 
+    def _ask_depth_filter(self, table) -> tuple[bool, DepthFilter | None]:
+        """Offer a strict depth filter when a depth column was detected."""
+        if not table.depth_column:
+            return True, None
+        dialog = tk.Toplevel(self)
+        dialog.title("Filter wells by depth")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        result: dict[str, object] = {"accepted": False, "filter": None}
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=f"Detected depth column: {table.depth_column}\n"
+                 "Optionally restrict the rows resolved into this review.",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        comparison_var = tk.StringVar(value="less_than")
+        ttk.Radiobutton(
+            body, text="Depth is less than", variable=comparison_var,
+            value="less_than",
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Radiobutton(
+            body, text="Depth is greater than", variable=comparison_var,
+            value="greater_than",
+        ).grid(row=2, column=0, sticky="w", pady=(7, 0))
+        threshold_var = tk.StringVar(value="200")
+        threshold_entry = ttk.Entry(body, textvariable=threshold_var, width=14)
+        threshold_entry.grid(row=1, column=1, rowspan=2, sticky="w", padx=(12, 0))
+        ttk.Label(body, text="feet").grid(row=1, column=1, rowspan=2,
+                                           sticky="e", padx=(0, 4))
+        include_blank_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            body, text="Include rows with blank depths",
+            variable=include_blank_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(14, 0))
+        buttons = ttk.Frame(body)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(18, 0))
+
+        def finish(depth_filter: DepthFilter | None, accepted: bool = True) -> None:
+            result["accepted"] = accepted
+            result["filter"] = depth_filter
+            dialog.destroy()
+
+        def apply_filter() -> None:
+            try:
+                threshold = float(threshold_var.get().strip().replace(",", ""))
+                if not math.isfinite(threshold):
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Numeric depth required", "Enter a finite depth in feet.",
+                    parent=dialog,
+                )
+                threshold_entry.focus_set()
+                return
+            finish(DepthFilter(
+                table.depth_column, comparison_var.get(), threshold,
+                include_blank_var.get(),
+            ))
+
+        ttk.Button(buttons, text="Cancel", command=lambda: finish(None, False)).pack(
+            side="left"
+        )
+        ttk.Button(buttons, text="Load all depths", command=lambda: finish(None)).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(buttons, text="Apply filter", command=apply_filter).pack(
+            side="left", padx=(8, 0)
+        )
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(None, False))
+        dialog.bind("<Escape>", lambda _event: finish(None, False))
+        dialog.grab_set()
+        dialog.wait_visibility()
+        threshold_entry.focus_set()
+        threshold_entry.selection_range(0, "end")
+        self.wait_window(dialog)
+        return bool(result["accepted"]), result["filter"]  # type: ignore[return-value]
+
     def _load_manifest_interactive(self, source: str):
         try:
-            return load_manifest(source)
+            table = load_manifest(source)
         except ColumnSelectionRequired as required:
-            return self._ask_manifest_columns(required)
+            table = self._ask_manifest_columns(required)
         except ManifestError as exc:
             messagebox.showerror("Cannot read image list", f"{source}\n\n{exc}",
                                  parent=self)
             return None
+        if table is None:
+            return None
+        accepted, depth_filter = self._ask_depth_filter(table)
+        return (table, depth_filter) if accepted else None
 
     def _pick_image_list(self) -> bool:
         source = filedialog.askopenfilename(
@@ -724,9 +824,10 @@ class ReviewApp(tk.Tk):
             if not self.all_paths:
                 self._show_welcome()
             return False
-        table = self._load_manifest_interactive(source)
-        if table is None:
+        loaded = self._load_manifest_interactive(source)
+        if loaded is None:
             return False
+        table, depth_filter = loaded
         folder = ""
         folder_images: list[str] = []
         if not table.has_paths:
@@ -744,7 +845,7 @@ class ReviewApp(tk.Tk):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            result = resolve_manifest(table, folder_images)
+            result = resolve_manifest(table, folder_images, depth_filter=depth_filter)
         finally:
             self.configure(cursor="")
         if not result.paths:
@@ -880,11 +981,14 @@ class ReviewApp(tk.Tk):
             return
         current_paths = list(self.all_paths)
         identifiers = dict(self._path_identifiers)
+        locations = dict(self._path_locations)
+        location_columns = list(self.store.location_columns) if self.store else []
         label = self.source_label or os.path.basename(self.folder)
         self._choose_workbook(
             self.folder or os.getcwd(), current_paths, source_name=label,
             opener=lambda workbook: self._open_resolved_source(
-                current_paths, workbook, self.folder or os.getcwd(), label, identifiers
+                current_paths, workbook, self.folder or os.getcwd(), label, identifiers,
+                locations, location_columns,
             ),
         )
 
@@ -1038,7 +1142,14 @@ class ReviewApp(tk.Tk):
                             source_root: str) -> bool:
         label = os.path.splitext(os.path.basename(result.source.source_path))[0]
         if not self._open_resolved_source(
-            result.paths, workbook, source_root, label, result.path_identifiers
+            result.paths, workbook, source_root, label, result.path_identifiers,
+            result.path_locations,
+            [
+                name for name, selected in (
+                    ("latitude", result.source.latitude_column),
+                    ("longitude", result.source.longitude_column),
+                ) if selected
+            ],
         ):
             return False
         self.source_manifest = result.source.source_path
@@ -1060,7 +1171,9 @@ class ReviewApp(tk.Tk):
 
     def _open_resolved_source(self, found: list[str], workbook: str | None,
                               source_root: str, source_label: str,
-                              identifiers: dict[str, str]) -> bool:
+                              identifiers: dict[str, str],
+                              locations: dict[str, dict[str, str]] | None = None,
+                              location_columns: list[str] | None = None) -> bool:
         """Open an already resolved folder or manifest image collection."""
         if self.index >= 0 and not self._resolve_pending_draft():
             return False
@@ -1098,6 +1211,7 @@ class ReviewApp(tk.Tk):
         self.source_label = source_label
         self.source_manifest = ""
         self._path_identifiers = dict(identifiers)
+        self._path_locations = dict(locations or {})
         self.all_paths = list(found)
         self.paths = list(found)
         self.view_mode = "all"
@@ -1105,12 +1219,19 @@ class ReviewApp(tk.Tk):
         self.infos = {}
         self.index = -1
         self.store = new_store
+        for column in location_columns or []:
+            if column not in self.store.location_columns:
+                self.store.location_columns.append(column)
         self.reviewer = reviewer
         self.reviewer_var.set(reviewer)
         for path in self.all_paths:  # seed rows so the workbook lists every file
             key = os.path.normcase(os.path.abspath(path))
             log_id = identifiers.get(key) or pages.api14_from_name(path)
-            record = self.store.record_for(path, log_id)
+            location = self._path_locations.get(key, {})
+            record = self.store.record_for(
+                path, log_id, location.get("latitude", ""),
+                location.get("longitude", ""),
+            )
             if identifiers.get(key):
                 record.api14 = log_id
         self.folder_var.set(f"{source_label}   ({len(self.all_paths)} images)")
@@ -1237,13 +1358,16 @@ class ReviewApp(tk.Tk):
         )
         if not source:
             return
-        table = self._load_manifest_interactive(source)
-        if table is None:
+        loaded = self._load_manifest_interactive(source)
+        if loaded is None:
             return
+        table, depth_filter = loaded
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            result = resolve_manifest(table, self.all_paths)
+            result = resolve_manifest(
+                table, self.all_paths, depth_filter=depth_filter
+            )
         finally:
             self.configure(cursor="")
         if not result.paths:
@@ -1274,27 +1398,49 @@ class ReviewApp(tk.Tk):
         old_dirty = self.store.dirty
         old_paths = list(self.all_paths)
         old_identifiers = dict(self._path_identifiers)
-        old_record_ids = {name: record.api14 for name, record in self.store.records.items()}
+        old_locations = dict(self._path_locations)
+        old_location_columns = list(self.store.location_columns)
+        old_record_values = {
+            name: (record.api14, record.latitude, record.longitude)
+            for name, record in self.store.records.items()
+        }
+        for name, selected in (
+            ("latitude", result.source.latitude_column),
+            ("longitude", result.source.longitude_column),
+        ):
+            if selected and name not in self.store.location_columns:
+                self.store.location_columns.append(name)
         existing_keys = {os.path.normcase(os.path.abspath(path)) for path in self.all_paths}
         for path in result.paths:
             key = os.path.normcase(os.path.abspath(path))
             identifier = result.path_identifiers[key]
             self._path_identifiers[key] = identifier
+            location = result.path_locations.get(key, {})
+            self._path_locations[key] = dict(location)
             if key not in existing_keys:
                 self.all_paths.append(path)
                 existing_keys.add(key)
-            self.store.record_for(path, identifier).api14 = identifier
+            record = self.store.record_for(
+                path, identifier, location.get("latitude", ""),
+                location.get("longitude", ""),
+            )
+            record.api14 = identifier
         self.store.replace_subset(result.loaded_identifiers)
         if not self._save_store(quiet=True):
             self.store.subset_apis = old_subset
             self.store.dirty = old_dirty
             self.all_paths = old_paths
             self._path_identifiers = old_identifiers
+            self._path_locations = old_locations
+            self.store.location_columns = old_location_columns
             for name in list(self.store.records):
-                if name not in old_record_ids:
+                if name not in old_record_values:
                     self.store.records.pop(name)
                 else:
-                    self.store.records[name].api14 = old_record_ids[name]
+                    api, latitude, longitude = old_record_values[name]
+                    self.store.records[name].api14 = api
+                    self.store.records[name].latitude = latitude
+                    self.store.records[name].longitude = longitude
             self._refresh_scope_controls()
             return
         report = audit_report_path(source, self.store.path)

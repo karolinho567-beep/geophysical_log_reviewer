@@ -27,6 +27,17 @@ PATH_ALIASES = {
     "tifpath", "tif_path", "tiffpath", "tiff_path", "filepath", "file_path",
     "imagepath", "image_path", "logpath", "log_path",
 }
+LATITUDE_ALIASES = {
+    "lat", "latitude", "welllat", "well_lat", "welllatitude", "well_latitude",
+}
+LONGITUDE_ALIASES = {
+    "long", "lon", "lng", "longitude", "welllong", "well_long", "welllon",
+    "well_lon", "welllongitude", "well_longitude",
+}
+DEPTH_ALIASES = {
+    "depth", "depth1", "depth_1", "welldepth", "well_depth", "totaldepth",
+    "total_depth", "depthft", "depth_ft", "depthfeet", "depth_feet",
+}
 PLACEHOLDERS = {"ihs assoc image"}
 AUDIT_COLUMNS = [
     "import_row", "source_identifier", "match_identifier", "source_tif_path",
@@ -43,11 +54,15 @@ class ColumnSelectionRequired(ManifestError):
     """The UI must ask which columns carry identifiers and paths."""
 
     def __init__(self, table: "SourceTable", id_candidates: list[str],
-                 path_candidates: list[str]):
+                 path_candidates: list[str], latitude_candidates: list[str],
+                 longitude_candidates: list[str], depth_candidates: list[str]):
         super().__init__("Select the identifier and optional TIFF-path columns.")
         self.table = table
         self.id_candidates = id_candidates
         self.path_candidates = path_candidates
+        self.latitude_candidates = latitude_candidates
+        self.longitude_candidates = longitude_candidates
+        self.depth_candidates = depth_candidates
 
 
 @dataclass(frozen=True)
@@ -57,6 +72,9 @@ class SourceTable:
     rows: tuple[OrderedDict[str, str], ...]
     identifier_column: str | None = None
     path_column: str | None = None
+    latitude_column: str | None = None
+    longitude_column: str | None = None
+    depth_column: str | None = None
 
     @property
     def has_paths(self) -> bool:
@@ -100,8 +118,24 @@ class ImportStats:
     placeholder_rows: int = 0
     placeholder_covered: int = 0
     placeholder_unresolved: int = 0
+    eligible_unique_identifiers: int = 0
+    depth_filtered_rows: int = 0
+    depth_filtered_identifiers: int = 0
+    invalid_depth_rows: int = 0
+    depth_filter_description: str = ""
 
     def summary(self) -> str:
+        depth_lines = ""
+        if self.depth_filter_description:
+            depth_lines = (
+                f"\nDepth filter: {self.depth_filter_description}\n"
+                f"Rows excluded by depth filter: {self.depth_filtered_rows}\n"
+                f"Rows with invalid depth excluded: {self.invalid_depth_rows}\n"
+                f"Identifiers eligible after depth filter: "
+                f"{self.eligible_unique_identifiers}\n"
+                f"Identifiers fully excluded by depth filter: "
+                f"{self.depth_filtered_identifiers}"
+            )
         return (
             f"Input rows: {self.input_rows}\n"
             f"Valid unique identifiers: {self.valid_unique_identifiers}\n"
@@ -117,6 +151,7 @@ class ImportStats:
             f"IHS placeholder rows: {self.placeholder_rows} "
             f"({self.placeholder_covered} covered, "
             f"{self.placeholder_unresolved} unresolved)"
+            f"{depth_lines}"
         )
 
 
@@ -125,9 +160,30 @@ class ImportResult:
     source: SourceTable
     paths: list[str]
     path_identifiers: dict[str, str]
+    path_locations: dict[str, dict[str, str]]
     loaded_identifiers: list[str]
     audit_rows: list[AuditRow]
     stats: ImportStats
+
+
+@dataclass(frozen=True)
+class DepthFilter:
+    """Strict row filter applied to a detected numeric depth column."""
+
+    column: str
+    comparison: str
+    threshold: float
+    include_blank: bool = False
+
+    def __post_init__(self) -> None:
+        if self.comparison not in {"less_than", "greater_than"}:
+            raise ValueError("Depth comparison must be less_than or greater_than.")
+
+    @property
+    def description(self) -> str:
+        symbol = "<" if self.comparison == "less_than" else ">"
+        blanks = "including" if self.include_blank else "excluding"
+        return f"{self.column} {symbol} {self.threshold:g} ft, {blanks} blank depths"
 
 
 @dataclass
@@ -153,6 +209,9 @@ def _alias_keys(values: Iterable[str]) -> set[str]:
 
 _ID_KEYS = _alias_keys(IDENTIFIER_ALIASES)
 _PATH_KEYS = _alias_keys(PATH_ALIASES)
+_LAT_KEYS = _alias_keys(LATITUDE_ALIASES)
+_LONG_KEYS = _alias_keys(LONGITUDE_ALIASES)
+_DEPTH_KEYS = _alias_keys(DEPTH_ALIASES)
 
 
 def _cell_text(value) -> str:
@@ -260,11 +319,17 @@ def read_source(path: str) -> SourceTable:
 
 
 def select_columns(table: SourceTable, identifier_column: str | None = None,
-                   path_column: str | None = None) -> SourceTable:
+                   path_column: str | None = None,
+                   latitude_column: str | None = None,
+                   longitude_column: str | None = None,
+                   depth_column: str | None = None) -> SourceTable:
     """Attach selected columns, auto-detecting unambiguous aliases."""
     headers = list(table.headers)
     id_candidates = [h for h in headers if _header_key(h) in _ID_KEYS]
     path_candidates = [h for h in headers if _header_key(h) in _PATH_KEYS]
+    latitude_candidates = [h for h in headers if _header_key(h) in _LAT_KEYS]
+    longitude_candidates = [h for h in headers if _header_key(h) in _LONG_KEYS]
+    depth_candidates = [h for h in headers if _header_key(h) in _DEPTH_KEYS]
     if identifier_column is None:
         if table.identifier_column:
             identifier_column = table.identifier_column
@@ -272,19 +337,40 @@ def select_columns(table: SourceTable, identifier_column: str | None = None,
             identifier_column = id_candidates[0]
     if path_column is None and len(path_candidates) == 1:
         path_column = path_candidates[0]
+    if latitude_column is None and len(latitude_candidates) == 1:
+        latitude_column = latitude_candidates[0]
+    if longitude_column is None and len(longitude_candidates) == 1:
+        longitude_column = longitude_candidates[0]
+    if depth_column is None and len(depth_candidates) == 1:
+        depth_column = depth_candidates[0]
     needs_id = identifier_column not in headers
     ambiguous_path = len(path_candidates) > 1 and path_column not in headers
-    if needs_id or ambiguous_path:
-        raise ColumnSelectionRequired(table, id_candidates, path_candidates)
-    if path_column and path_column not in headers:
-        raise ManifestError(f"Unknown TIFF-path column: {path_column}")
+    ambiguous_lat = len(latitude_candidates) > 1 and latitude_column not in headers
+    ambiguous_long = len(longitude_candidates) > 1 and longitude_column not in headers
+    ambiguous_depth = len(depth_candidates) > 1 and depth_column not in headers
+    if needs_id or ambiguous_path or ambiguous_lat or ambiguous_long or ambiguous_depth:
+        raise ColumnSelectionRequired(
+            table, id_candidates, path_candidates, latitude_candidates,
+            longitude_candidates, depth_candidates,
+        )
+    for label, selected in (
+        ("TIFF-path", path_column), ("latitude", latitude_column),
+        ("longitude", longitude_column), ("depth", depth_column),
+    ):
+        if selected and selected not in headers:
+            raise ManifestError(f"Unknown {label} column: {selected}")
     return SourceTable(table.source_path, table.headers, table.rows,
-                       identifier_column, path_column)
+                       identifier_column, path_column, latitude_column,
+                       longitude_column, depth_column)
 
 
 def load_manifest(path: str, identifier_column: str | None = None,
-                  path_column: str | None = None) -> SourceTable:
-    return select_columns(read_source(path), identifier_column, path_column)
+                  path_column: str | None = None,
+                  latitude_column: str | None = None,
+                  longitude_column: str | None = None,
+                  depth_column: str | None = None) -> SourceTable:
+    return select_columns(read_source(path), identifier_column, path_column,
+                          latitude_column, longitude_column, depth_column)
 
 
 def normalize_identifier(value: str) -> tuple[str, tuple[str, ...]]:
@@ -320,17 +406,25 @@ def _probe(path: str, probe_fn: Callable[[str], object]) -> tuple[bool, str, str
 
 
 def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
-                     probe_fn: Callable[[str], object] = pages.probe) -> ImportResult:
+                     probe_fn: Callable[[str], object] = pages.probe,
+                     depth_filter: DepthFilter | None = None) -> ImportResult:
     """Resolve a manifest into readable logical images and row-level audit data."""
     if not table.identifier_column:
         raise ManifestError("No identifier column was selected.")
+    if depth_filter and depth_filter.column not in table.headers:
+        raise ManifestError(f"Unknown depth column: {depth_filter.column}")
     folder_paths = [os.path.abspath(path) for path in folder_images]
     folder_by_name = {os.path.basename(path).casefold(): path for path in folder_paths}
     audit: list[AuditRow] = []
     valid_order: list[str] = []
+    all_valid_order: list[str] = []
     variants_by_id: dict[str, tuple[str, ...]] = {}
+    all_valid_ids: set[str] = set()
+    eligible_ids: set[str] = set()
     invalid_values: set[str] = set()
     rows_by_id: dict[str, list[int]] = defaultdict(list)
+    depth_filtered_rows = 0
+    invalid_depth_rows = 0
 
     for row_number, original in enumerate(table.rows, start=2):
         raw_id = original.get(table.identifier_column, "")
@@ -344,6 +438,44 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
             item.detail = "Identifier must contain 1 to 14 digits."
             invalid_values.add(str(raw_id).strip())
             continue
+        if identifier not in all_valid_ids:
+            all_valid_ids.add(identifier)
+            all_valid_order.append(identifier)
+        if depth_filter:
+            raw_depth = original.get(depth_filter.column, "").strip()
+            if not raw_depth:
+                if not depth_filter.include_blank:
+                    item.load_status = "filtered_blank_depth"
+                    item.detail = (
+                        f"Blank {depth_filter.column} excluded by the depth filter."
+                    )
+                    depth_filtered_rows += 1
+                    continue
+            else:
+                try:
+                    depth = float(raw_depth.replace(",", ""))
+                except ValueError:
+                    item.load_status = "filtered_invalid_depth"
+                    item.detail = (
+                        f"{depth_filter.column} is not a numeric depth: {raw_depth!r}."
+                    )
+                    invalid_depth_rows += 1
+                    continue
+                keep = (
+                    depth < depth_filter.threshold
+                    if depth_filter.comparison == "less_than"
+                    else depth > depth_filter.threshold
+                )
+                if not keep:
+                    symbol = "<" if depth_filter.comparison == "less_than" else ">"
+                    item.load_status = "filtered_depth"
+                    item.detail = (
+                        f"Depth {depth:g} ft does not satisfy {symbol} "
+                        f"{depth_filter.threshold:g} ft."
+                    )
+                    depth_filtered_rows += 1
+                    continue
+        eligible_ids.add(identifier)
         if identifier not in variants_by_id:
             valid_order.append(identifier)
             variants_by_id[identifier] = variants
@@ -509,17 +641,38 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
     loaded_ids = [identifier for identifier in valid_order if resolved_by_id.get(identifier)]
     ordered_paths: list[str] = []
     path_identifiers: dict[str, str] = {}
+    identifier_locations: dict[str, dict[str, str]] = {}
+    for identifier, indices in rows_by_id.items():
+        location = {"latitude": "", "longitude": ""}
+        for index in indices:
+            original = audit[index].original
+            if table.latitude_column and not location["latitude"]:
+                location["latitude"] = original.get(table.latitude_column, "").strip()
+            if table.longitude_column and not location["longitude"]:
+                location["longitude"] = original.get(table.longitude_column, "").strip()
+        identifier_locations[identifier] = location
+    path_locations: dict[str, dict[str, str]] = {}
     for identifier in valid_order:
         for candidate in resolved_by_id.get(identifier, []):
             ordered_paths.append(candidate.resolved_path)
-            path_identifiers[os.path.normcase(os.path.abspath(candidate.resolved_path))] = identifier
+            path_key = os.path.normcase(os.path.abspath(candidate.resolved_path))
+            path_identifiers[path_key] = identifier
+            path_locations[path_key] = dict(identifier_locations.get(identifier, {}))
+
+    # A filtered row can refer to an identifier retained by another source row.
+    # Keep its audit status as filtered while still reporting whether the well loaded.
+    loaded_id_set = set(loaded_ids)
+    for item in audit:
+        identifier, _ = normalize_identifier(item.source_identifier)
+        if item.load_status.startswith("filtered_"):
+            item.well_loaded = identifier in loaded_id_set
 
     placeholder_covered = sum(
         1 for index in placeholder_indices if audit[index].load_status == "placeholder_covered"
     )
     stats = ImportStats(
         input_rows=len(audit),
-        valid_unique_identifiers=len(valid_order),
+        valid_unique_identifiers=len(all_valid_order),
         invalid_unique_identifiers=len(invalid_values),
         unique_tiff_candidates=len(candidates),
         loaded_tiffs=len(resolved_candidates),
@@ -538,8 +691,15 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
         placeholder_rows=len(placeholder_indices),
         placeholder_covered=placeholder_covered,
         placeholder_unresolved=len(placeholder_indices) - placeholder_covered,
+        eligible_unique_identifiers=len(eligible_ids),
+        depth_filtered_rows=depth_filtered_rows,
+        depth_filtered_identifiers=len(all_valid_ids - eligible_ids),
+        invalid_depth_rows=invalid_depth_rows,
+        depth_filter_description=depth_filter.description if depth_filter else "",
     )
-    return ImportResult(table, ordered_paths, path_identifiers, loaded_ids, audit, stats)
+    return ImportResult(
+        table, ordered_paths, path_identifiers, path_locations, loaded_ids, audit, stats
+    )
 
 
 def audit_report_path(source_path: str, workbook_path: str,

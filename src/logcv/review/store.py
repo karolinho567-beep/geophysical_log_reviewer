@@ -41,6 +41,7 @@ COLUMNS = [
     "file_path",      # same target as file_link, readable by pandas
 ]
 SUBSET_COLUMNS = list(COLUMNS)
+LOCATION_COLUMNS = ["latitude", "longitude"]
 LEGACY_SUBSET_COLUMNS = ["position", "log_api"]
 #: Required in all supported schemas. ``api14`` is accepted as the legacy alias
 #: for ``log_api``; ``log_types`` and ``reviewed_by`` were added later.
@@ -135,6 +136,8 @@ class Record:
     api14: str = ""
     reviewed_at: str = ""
     reviewed_by: str = ""
+    latitude: str = ""
+    longitude: str = ""
 
     @property
     def reviewed(self) -> bool:
@@ -179,7 +182,7 @@ def _parse_bool(value) -> bool | None:
     return None
 
 
-def _read_subset_apis(sheet) -> list[str]:
+def _read_subset_apis(sheet, expected_columns: list[str] | None = None) -> list[str]:
     """Read subset membership from the full mirror or v1.6 legacy schema."""
     rows = sheet.iter_rows(values_only=True)
     try:
@@ -194,7 +197,11 @@ def _read_subset_apis(sheet) -> list[str]:
         return _read_legacy_subset_apis(rows, header)
 
     actual = [str(value).strip().lower() for value in first if value is not None]
-    if actual != SUBSET_COLUMNS:
+    allowed = expected_columns or [
+        *SUBSET_COLUMNS,
+        *(name for name in LOCATION_COLUMNS if name in actual),
+    ]
+    if actual != allowed:
         raise InvalidWorkbook(
             "The subset worksheet must use the same columns and order as the review "
             "worksheet."
@@ -328,7 +335,14 @@ def validate_review_workbook(
         else:
             workbook_names = []
         if SUBSET_SHEET in book.sheetnames:
-            _read_subset_apis(book[SUBSET_SHEET])
+            review_columns = [
+                str(value).strip().lower() for value in first if value is not None
+            ]
+            supported_review_columns = [
+                *COLUMNS,
+                *(name for name in LOCATION_COLUMNS if name in review_columns),
+            ]
+            _read_subset_apis(book[SUBSET_SHEET], supported_review_columns)
     finally:
         book.close()
 
@@ -355,6 +369,7 @@ class ReviewStore:
         self.path = os.path.abspath(path)
         self.records: dict[str, Record] = {}
         self.subset_apis: list[str] = []
+        self.location_columns: list[str] = []
         self.dirty = False
 
     # ------------------------------------------------------------------ load
@@ -363,6 +378,7 @@ class ReviewStore:
         """Read existing verdicts. Returns how many rows were found."""
         self.records.clear()
         self.subset_apis.clear()
+        self.location_columns.clear()
         if not os.path.exists(self.path):
             return 0
         book = load_workbook(self.path, data_only=True)
@@ -377,6 +393,7 @@ class ReviewStore:
             str(cell.value).strip().lower(): i
             for i, cell in enumerate(header_cells) if cell.value
         }
+        self.location_columns = [name for name in LOCATION_COLUMNS if name in header]
 
         def cell(row, key, *aliases):
             i = next((header.get(name) for name in (key, *aliases)
@@ -407,17 +424,21 @@ class ReviewStore:
                 api14=str(getattr(cell(row, "log_api", "api14"), "value", "") or "").strip(),
                 reviewed_at=str(getattr(cell(row, "reviewed_at"), "value", "") or "").strip(),
                 reviewed_by=str(getattr(cell(row, "reviewed_by"), "value", "") or "").strip(),
+                latitude=str(getattr(cell(row, "latitude"), "value", "") or "").strip(),
+                longitude=str(getattr(cell(row, "longitude"), "value", "") or "").strip(),
             )
             self.records[name] = record
             found += 1
         if SUBSET_SHEET in book.sheetnames:
-            self.subset_apis = _read_subset_apis(book[SUBSET_SHEET])
+            review_columns = [*COLUMNS, *self.location_columns]
+            self.subset_apis = _read_subset_apis(book[SUBSET_SHEET], review_columns)
         book.close()
         return found
 
     # ----------------------------------------------------------------- rows
 
-    def record_for(self, path: str, api14: str = "") -> Record:
+    def record_for(self, path: str, api14: str = "", latitude: str = "",
+                   longitude: str = "") -> Record:
         """The record for ``path``, created blank the first time it is asked for."""
         name = os.path.basename(path)
         record = self.records.get(name)
@@ -428,13 +449,21 @@ class ReviewStore:
                 record.file_name = name
                 self.records[name] = record
         if record is None:
-            record = Record(file_name=name, file_path=os.path.abspath(path), api14=api14)
+            record = Record(
+                file_name=name, file_path=os.path.abspath(path), api14=api14,
+                latitude=str(latitude or "").strip(),
+                longitude=str(longitude or "").strip(),
+            )
             self.records[name] = record
         else:
             # A folder move rewrites the path; the verdict still belongs to the name.
             record.file_path = os.path.abspath(path)
             if api14 and not record.api14:
                 record.api14 = api14
+            if latitude:
+                record.latitude = str(latitude).strip()
+            if longitude:
+                record.longitude = str(longitude).strip()
         return record
 
     def stamp_types_in_use(self) -> list[str]:
@@ -539,10 +568,16 @@ class ReviewStore:
         header_font = Font(bold=True, color="FFFFFF")
         header_fill = PatternFill("solid", fgColor="44546A")
         link_font = Font(color="0563C1", underline="single")
-        widths = [16, 46, 11, 24, 28, 40, 20, 16, 70]
+        optional_columns = [
+            name for name in LOCATION_COLUMNS
+            if name in self.location_columns
+            or any(getattr(record, name) for record in self.records.values())
+        ]
+        output_columns = [*COLUMNS, *optional_columns]
+        widths = [16, 46, 11, 24, 28, 40, 20, 16, 70, 14, 14]
 
         def write_record_sheet(target, record_names: list[str]) -> None:
-            for col, column_name in enumerate(COLUMNS, start=1):
+            for col, column_name in enumerate(output_columns, start=1):
                 cell = target.cell(row=1, column=col, value=column_name)
                 cell.font = header_font
                 cell.fill = header_fill
@@ -567,11 +602,17 @@ class ReviewStore:
                 target.cell(row=row_i, column=7, value=record.reviewed_at or None)
                 target.cell(row=row_i, column=8, value=record.reviewed_by or None)
                 target.cell(row=row_i, column=9, value=record.file_path or None)
+                for column_name in optional_columns:
+                    column = output_columns.index(column_name) + 1
+                    target.cell(
+                        row=row_i, column=column,
+                        value=getattr(record, column_name) or None,
+                    )
             for col, width in enumerate(widths, start=1):
                 target.column_dimensions[get_column_letter(col)].width = width
             target.freeze_panes = "A2"
             last = max(2, written + 1)
-            target.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{last}"
+            target.auto_filter.ref = f"A1:{get_column_letter(len(output_columns))}{last}"
 
         write_record_sheet(sheet, names)
 

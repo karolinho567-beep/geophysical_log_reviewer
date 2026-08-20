@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.7.1**
+Current version: **1.7.2**
 
 ## Features
 
@@ -20,11 +20,15 @@ Current version: **1.7.1**
   without duplicating review answers.
 - Opens review collections from TXT, CSV, TSV, or XLSX lists, preserves short
   well identifiers, and recovers TIFFs from paths recorded in those files.
+- Carries detected latitude/longitude fields into optional review-workbook
+  columns and offers strict less-than/greater-than depth filtering with an
+  explicit choice for blank depths.
 - Writes row-level import audits and load statistics, including missing images
   and covered or unresolved `IHS ASSOC IMAGE` placeholders.
 - Reconciles an existing workbook with a changed TIFF folder while protecting the
   original workbook and preserving optional out-of-folder rows.
-- Migrates compatible v1.2 and v1.3 workbooks to the current nine-column schema.
+- Migrates compatible v1.2 and v1.3 workbooks to the current base schema while
+  preserving optional manifest location columns.
 - Builds as a portable Windows x64 application; Python is not required on the
   reviewer's computer.
 - Checks public GitHub Releases on every application start and can securely replace and restart

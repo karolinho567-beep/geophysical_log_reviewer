@@ -136,9 +136,10 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
 - An optional TXT, CSV, TSV, or XLSX image list for startup or **Evaluate a
   subset**. Headerless TXT files contain one identifier per nonblank line.
   Structured files contain a numeric identifier column and may contain a TIFF
-  path column. Common `API`/`UWI`/`WELL_ID` and `TIFPATH`/`FILE_PATH`/
-  `IMAGE_PATH` headers are detected case-insensitively; ambiguous files prompt
-  for an explicit column mapping.
+  path, latitude, longitude, and depth column. Common `API`/`UWI`/`WELL_ID`,
+  `TIFPATH`/`FILE_PATH`/`IMAGE_PATH`, `LAT`/`LATITUDE`, `LONG`/`LONGITUDE`, and
+  `DEPTH1`/`WELL_DEPTH` headers are detected case-insensitively; ambiguous files
+  prompt for an explicit column mapping.
 
 ## Steps
 
@@ -171,6 +172,11 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    listed in the file. Only identifiers with a readable image enter the subset.
    Cancellation or a failed workbook save leaves the prior subset unchanged. A
    timestamped row-level audit CSV is written beside the workbook.
+   When a depth column is detected, first choose **Load all depths** or apply a
+   strict **less than** / **greater than** threshold in feet. The dialog separately
+   controls whether blank depths remain eligible. Values equal to the threshold,
+   nonnumeric nonblank values, and blank values when unchecked are excluded and
+   identified explicitly in the audit.
 7. **When the sweep is complete**, compare it against the detector's
    `stamp_inventory.csv` (join its `api14` to `log_api`) and promote as described in
    [Outputs](#outputs).
@@ -227,6 +233,12 @@ back to their prior state.
   12-digit identifier also tries the standard trailing-`00` filename form.
 - **`IHS ASSOC IMAGE` is a placeholder, not a path.** It is marked covered when
   another TIFF loads for the same identifier and unresolved otherwise.
+- **Location fields are source metadata.** When a manifest maps latitude and/or
+  longitude, the first nonblank value for each eligible identifier is copied to
+  every loaded TIFF row for that identifier. The source file remains unchanged.
+- **Depth comparisons are strict and assume feet.** `< 200` excludes a depth of
+  exactly 200; `> 200` also excludes exactly 200. Invalid nonblank depths never
+  pass a numeric filter and are counted separately from blank depths.
 - **Attribution is latest-editor metadata, not an audit log.** Every successful
   Add/Update writes the active reviewer and local timestamp, replacing any prior
   attribution on that row. Existing untouched legacy rows remain blank.
@@ -291,10 +303,13 @@ near-instant afterward.
   | `reviewed_at` | local timestamp of the latest committed edit |
   | `reviewed_by` | active reviewer responsible for the latest committed edit |
   | `file_path` | the same target as plain text (hyperlinks are invisible to pandas) |
+  | `latitude` | optional source latitude, appended when a manifest maps that field |
+  | `longitude` | optional source longitude, appended when a manifest maps that field |
 
   Header is frozen and auto-filtered. The sheet is **rewritten in full on every
   save**, so the file on disk is always the complete current answer.
-- Optional sheet `subset` uses the exact same nine columns as `review` and contains
+- Optional sheet `subset` uses the exact same columns as `review` (the nine base
+  columns plus any appended location columns) and contains
   one complete row for every selected TIFF. It is a synchronized mirror: both
   viewer scopes edit the canonical records in `review`, and every successful save
   regenerates the subset rows with current verdicts, stamp types, log types, notes,
@@ -306,7 +321,8 @@ near-instant afterward.
 - `<source>_load_status_<timestamp>.csv` beside the workbook — every input row
   plus its identifier/path resolution, loaded flags, status, source, and detail.
   Its summary reports folder loads, listed-path recoveries, duplicates,
-  partial/unrecovered identifiers, and covered/unresolved placeholders.
+  partial/unrecovered identifiers, covered/unresolved placeholders, and any
+  depth-filter exclusions.
 - Bundled `log_types.json` — fixed choices maintained with the application.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and
   source identity metadata. Delete them at any time to force regeneration.
@@ -353,7 +369,7 @@ that in the ledger with the version and date.
   still loaded whole through PIL and do not use the persistent GDAL pyramid.
 - v1.2 through v1.6 workbooks may use `api14`, omit `log_types`, `reviewed_by`,
   or the optional `subset` sheet, and place `file_path` earlier in the schema.
-  They are accepted as legacy input and rewritten to the current nine-column schema
+  They are accepted as legacy input and rewritten to the current base schema
   on their next successful save without altering untouched review values.
 - The packaged executable is **unsigned**, so Windows SmartScreen shows "Windows
   protected your PC" on first launch on another machine — More info → Run anyway.

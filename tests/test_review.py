@@ -426,6 +426,46 @@ def test_short_identifier_round_trips_through_review_and_subset(tmp_path):
     assert loaded.subset_apis == ["21441"]
 
 
+def test_manifest_locations_add_optional_review_and_subset_columns(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.location_columns = ["latitude", "longitude"]
+    store.record_for(
+        str(tmp_path / "21441_RES.tif"), "21441", "28.801", "-96.902"
+    )
+    store.replace_subset(["21441"])
+    store.save(["21441_RES.tif"])
+
+    workbook = load_workbook(book, data_only=True)
+    expected = [*COLUMNS, "latitude", "longitude"]
+    assert [cell.value for cell in workbook["review"][1]] == expected
+    assert [cell.value for cell in workbook[SUBSET_SHEET][1]] == expected
+    assert workbook["review"].cell(row=2, column=10).value == "28.801"
+    assert workbook["review"].cell(row=2, column=11).value == "-96.902"
+    workbook.close()
+
+    validate_review_workbook(str(book), {"21441_RES.tif"})
+    loaded = ReviewStore(str(book))
+    loaded.load()
+    assert loaded.location_columns == ["latitude", "longitude"]
+    assert loaded.records["21441_RES.tif"].latitude == "28.801"
+    assert loaded.records["21441_RES.tif"].longitude == "-96.902"
+
+
+def test_detected_blank_location_columns_remain_in_workbook(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.location_columns = ["latitude", "longitude"]
+    store.record_for(str(tmp_path / "a.tif"), "1")
+    store.save(["a.tif"])
+    header = [cell.value for cell in load_workbook(book)["review"][1]]
+    assert header == [*COLUMNS, "latitude", "longitude"]
+
+
 def test_remove_records_supports_reconciliation_rollback(tmp_path):
     store = ReviewStore(str(tmp_path / "review.xlsx"))
     store.record_for("C:/a.tif")

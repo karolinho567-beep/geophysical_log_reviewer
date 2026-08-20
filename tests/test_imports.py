@@ -10,6 +10,7 @@ from openpyxl import Workbook
 
 from logcv.review.imports import (
     ColumnSelectionRequired,
+    DepthFilter,
     audit_report_path,
     load_manifest,
     normalize_identifier,
@@ -56,6 +57,18 @@ def test_csv_and_tsv_aliases_and_quoted_unc_paths_are_detected(tmp_path):
                         encoding="utf-8")
     table = load_manifest(str(tsv_path))
     assert (table.identifier_column, table.path_column) == ("well_id", "image_path")
+
+
+def test_location_and_depth_columns_are_detected_case_insensitively(tmp_path):
+    source = tmp_path / "wells.csv"
+    source.write_text(
+        "API,TIFPATH,LAT,LONG,Depth1\n21441,a.tif,28.8,-96.9,175\n",
+        encoding="utf-8",
+    )
+    table = load_manifest(str(source))
+    assert table.latitude_column == "LAT"
+    assert table.longitude_column == "LONG"
+    assert table.depth_column == "Depth1"
 
 
 def test_xlsx_uses_first_sheet_with_identifier_columns_and_formats_numbers(tmp_path):
@@ -121,6 +134,62 @@ def test_resolution_prefers_folder_then_recovers_external_and_loads_all_tiffs(tm
         "loaded_from_selected_folder", "recovered_from_listed_path",
         "loaded_from_selected_folder", "placeholder_covered",
     ]
+
+
+def test_depth_filter_is_strict_and_can_include_or_exclude_blanks(tmp_path):
+    paths = {value: _touch(tmp_path / f"{value}.tif") for value in ("1", "2", "3", "4")}
+    source = tmp_path / "depths.csv"
+    source.write_text(
+        "API,TIFPATH,DEPTH1\n"
+        f"1,{paths['1']},199.9\n"
+        f"2,{paths['2']},200\n"
+        f"3,{paths['3']},250\n"
+        f"4,{paths['4']},\n",
+        encoding="utf-8",
+    )
+    table = load_manifest(str(source))
+    excluded_blanks = resolve_manifest(
+        table, probe_fn=_ok_probe,
+        depth_filter=DepthFilter("DEPTH1", "less_than", 200, False),
+    )
+    assert excluded_blanks.loaded_identifiers == ["1"]
+    assert [row.load_status for row in excluded_blanks.audit_rows] == [
+        "recovered_from_listed_path", "filtered_depth", "filtered_depth",
+        "filtered_blank_depth",
+    ]
+    assert excluded_blanks.stats.depth_filtered_rows == 3
+    assert excluded_blanks.stats.depth_filtered_identifiers == 3
+
+    included_blanks = resolve_manifest(
+        table, probe_fn=_ok_probe,
+        depth_filter=DepthFilter("DEPTH1", "less_than", 200, True),
+    )
+    assert included_blanks.loaded_identifiers == ["1", "4"]
+    assert included_blanks.stats.eligible_unique_identifiers == 2
+
+
+def test_greater_than_filter_excludes_invalid_depth_and_propagates_coordinates(tmp_path):
+    deep = _touch(tmp_path / "21441.tif")
+    invalid = _touch(tmp_path / "22536.tif")
+    source = tmp_path / "locations.csv"
+    source.write_text(
+        "UWI,TIFPATH,Latitude,Longitude,well_depth\n"
+        f"21441,{deep},28.801,-96.902,201\n"
+        f"22536,{invalid},28.9,-97.0,unknown\n",
+        encoding="utf-8",
+    )
+    table = load_manifest(str(source))
+    result = resolve_manifest(
+        table, probe_fn=_ok_probe,
+        depth_filter=DepthFilter("well_depth", "greater_than", 200, False),
+    )
+    key = os.path.normcase(os.path.abspath(deep))
+    assert result.loaded_identifiers == ["21441"]
+    assert result.path_locations[key] == {
+        "latitude": "28.801", "longitude": "-96.902",
+    }
+    assert result.audit_rows[1].load_status == "filtered_invalid_depth"
+    assert result.stats.invalid_depth_rows == 1
 
 
 def test_relative_listed_paths_resolve_from_manifest_directory(tmp_path):
