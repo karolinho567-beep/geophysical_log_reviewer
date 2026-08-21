@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.7.3**
+Current version: **1.7.4**
 
 ## Features
 
@@ -25,6 +25,8 @@ Current version: **1.7.3**
   explicit choice for blank depths.
 - Writes row-level import audits and load statistics, including missing images
   and covered or unresolved `IHS ASSOC IMAGE` placeholders.
+- Resolves large manifests off the GUI thread with visible progress, cancellation,
+  parallel TIFF metadata checks, and one bounded availability check per UNC share.
 - Reconciles an existing workbook with a changed TIFF folder while protecting the
   original workbook and preserving optional out-of-folder rows.
 - Migrates compatible v1.2 and v1.3 workbooks to the current base schema while

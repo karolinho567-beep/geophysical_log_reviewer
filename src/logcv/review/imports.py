@@ -9,7 +9,9 @@ import csv
 import datetime as _dt
 import os
 import re
+import threading
 from collections import OrderedDict, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -48,6 +50,10 @@ AUDIT_COLUMNS = [
 
 class ManifestError(ValueError):
     """A selected source cannot be interpreted safely."""
+
+
+class ImportCancelled(ManifestError):
+    """The user cancelled image resolution before it completed."""
 
 
 class ColumnSelectionRequired(ManifestError):
@@ -123,6 +129,8 @@ class ImportStats:
     depth_filtered_identifiers: int = 0
     invalid_depth_rows: int = 0
     depth_filter_description: str = ""
+    unavailable_network_shares: int = 0
+    network_paths_skipped: int = 0
 
     def summary(self) -> str:
         depth_lines = ""
@@ -135,6 +143,13 @@ class ImportStats:
                 f"{self.eligible_unique_identifiers}\n"
                 f"Identifiers fully excluded by depth filter: "
                 f"{self.depth_filtered_identifiers}"
+            )
+        network_lines = ""
+        if self.unavailable_network_shares:
+            network_lines = (
+                f"\nNetwork shares unavailable or timed out: "
+                f"{self.unavailable_network_shares}\n"
+                f"Network paths skipped: {self.network_paths_skipped}"
             )
         return (
             f"Input rows: {self.input_rows}\n"
@@ -151,7 +166,7 @@ class ImportStats:
             f"IHS placeholder rows: {self.placeholder_rows} "
             f"({self.placeholder_covered} covered, "
             f"{self.placeholder_unresolved} unresolved)"
-            f"{depth_lines}"
+            f"{depth_lines}{network_lines}"
         )
 
 
@@ -405,9 +420,50 @@ def _probe(path: str, probe_fn: Callable[[str], object]) -> tuple[bool, str, str
     return True, "", ""
 
 
+def _unc_share_root(path: str) -> str:
+    r"""Return ``\\server\share`` without touching the referenced filesystem."""
+    value = str(path or "").replace("/", "\\")
+    if not value.startswith("\\\\"):
+        return ""
+    parts = [part for part in value[2:].split("\\") if part]
+    if len(parts) < 2:
+        return ""
+    return f"\\\\{parts[0]}\\{parts[1]}"
+
+
+def _network_root_status(
+    root: str, timeout: float, check_fn: Callable[[str], bool]
+) -> tuple[bool, str]:
+    """Bound one UNC-share availability check with a daemon helper thread."""
+    finished = threading.Event()
+    state: dict[str, object] = {}
+
+    def check() -> None:
+        try:
+            state["available"] = bool(check_fn(root))
+        except Exception as exc:  # network/provider errors are ordinary failures
+            state["error"] = str(exc)
+        finally:
+            finished.set()
+
+    threading.Thread(
+        target=check, daemon=True, name="logreview-network-preflight"
+    ).start()
+    if not finished.wait(max(0.05, float(timeout))):
+        return False, f"Network share did not respond within {timeout:g} seconds."
+    if state.get("available"):
+        return True, ""
+    return False, str(state.get("error") or "Network share is not accessible.")
+
+
 def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
                      probe_fn: Callable[[str], object] = pages.probe,
-                     depth_filter: DepthFilter | None = None) -> ImportResult:
+                     depth_filter: DepthFilter | None = None,
+                     progress_fn: Callable[[int, int, str], None] | None = None,
+                     cancel_event: threading.Event | None = None,
+                     max_workers: int = 8,
+                     network_timeout: float = 4.0,
+                     network_check: Callable[[str], bool] = os.path.isdir) -> ImportResult:
     """Resolve a manifest into readable logical images and row-level audit data."""
     if not table.identifier_column:
         raise ManifestError("No identifier column was selected.")
@@ -537,25 +593,37 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
         if owner != candidate.identifier:
             conflict_keys.add(key)
 
-    probe_cache: dict[str, tuple[bool, str, str]] = {}
-
-    def checked(path: str) -> tuple[bool, str, str]:
-        key = os.path.normcase(os.path.abspath(path))
-        if key not in probe_cache:
-            probe_cache[key] = _probe(path, probe_fn)
-        return probe_cache[key]
-
     failed_by_id: dict[str, int] = defaultdict(int)
-    resolved_candidates: list[_LogicalCandidate] = []
-    for key, candidate in candidates.items():
-        if key in conflict_keys:
-            candidate.failure_status = "basename_conflict"
-            candidate.failure_detail = (
-                f"The same TIFF basename is already assigned to identifier "
-                f"{basename_owner[candidate.basename]}."
-            )
-            failed_by_id[candidate.identifier] += 1
-            continue
+    available_roots: dict[str, tuple[bool, str]] = {}
+    for candidate in candidates.values():
+        candidate_paths = [candidate.folder_path] if candidate.folder_path else []
+        candidate_paths.extend(candidate.listed_paths)
+        for path in candidate_paths:
+            root = _unc_share_root(path)
+            if root:
+                available_roots.setdefault(root, (False, ""))
+    total_candidates = sum(key not in conflict_keys for key in candidates)
+    for root in list(available_roots):
+        if cancel_event and cancel_event.is_set():
+            raise ImportCancelled("Image-list loading was cancelled.")
+        if progress_fn:
+            progress_fn(0, total_candidates, f"Checking network share {root}")
+        available_roots[root] = _network_root_status(
+            root, network_timeout, network_check
+        )
+
+    unavailable_paths = {
+        os.path.normcase(os.path.abspath(path))
+        for candidate in candidates.values()
+        for path in ([candidate.folder_path] if candidate.folder_path else [])
+                    + candidate.listed_paths
+        if (_unc_share_root(path)
+            and not available_roots[_unc_share_root(path)][0])
+    }
+
+    def resolve_candidate(candidate: _LogicalCandidate) -> None:
+        if cancel_event and cancel_event.is_set():
+            return
         choices: list[tuple[str, str]] = []
         if candidate.folder_path:
             choices.append((candidate.folder_path, "selected_folder"))
@@ -566,23 +634,70 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
                 choices.append((path, "listed_path"))
         failures: list[tuple[str, str]] = []
         for path, source in choices:
-            ok, status, detail = checked(path)
+            if cancel_event and cancel_event.is_set():
+                return
+            root = _unc_share_root(path)
+            if root and not available_roots[root][0]:
+                failures.append(("network_unavailable", available_roots[root][1]))
+                continue
+            ok, status, detail = _probe(path, probe_fn)
             if ok:
                 candidate.resolved_path = os.path.abspath(path)
                 candidate.resolution_source = source
-                resolved_candidates.append(candidate)
-                break
+                return
             failures.append((status, detail))
-        if not candidate.resolved_path:
+        if failures:
+            candidate.failure_status, candidate.failure_detail = failures[-1]
+        elif candidate.listed_paths:
+            candidate.failure_status = "path_missing"
+            candidate.failure_detail = "No listed path was accessible."
+        else:
+            candidate.failure_status = "no_path"
+            candidate.failure_detail = "No TIFF path was supplied or matched."
+
+    candidate_items = [
+        (key, candidate) for key, candidate in candidates.items()
+        if key not in conflict_keys
+    ]
+    executor = ThreadPoolExecutor(
+        max_workers=max(1, min(int(max_workers), len(candidate_items) or 1)),
+        thread_name_prefix="logreview-manifest",
+    )
+    futures = {
+        executor.submit(resolve_candidate, candidate): candidate
+        for _key, candidate in candidate_items
+    }
+    completed = 0
+    cancelled = False
+    try:
+        for future in as_completed(futures):
+            future.result()
+            completed += 1
+            candidate = futures[future]
+            if progress_fn:
+                progress_fn(completed, len(candidate_items), candidate.basename)
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
+    finally:
+        executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+    if cancelled:
+        raise ImportCancelled("Image-list loading was cancelled.")
+
+    resolved_candidates: list[_LogicalCandidate] = []
+    for key, candidate in candidates.items():
+        if key in conflict_keys:
+            candidate.failure_status = "basename_conflict"
+            candidate.failure_detail = (
+                f"The same TIFF basename is already assigned to identifier "
+                f"{basename_owner[candidate.basename]}."
+            )
             failed_by_id[candidate.identifier] += 1
-            if failures:
-                candidate.failure_status, candidate.failure_detail = failures[-1]
-            elif candidate.listed_paths:
-                candidate.failure_status = "path_missing"
-                candidate.failure_detail = "No listed path was accessible."
-            else:
-                candidate.failure_status = "no_path"
-                candidate.failure_detail = "No TIFF path was supplied or matched."
+            continue
+        if candidate.resolved_path:
+            resolved_candidates.append(candidate)
+        else:
+            failed_by_id[candidate.identifier] += 1
 
     resolved_by_id: dict[str, list[_LogicalCandidate]] = defaultdict(list)
     candidate_by_key = {(c.identifier, c.basename): c for c in candidates.values()}
@@ -696,6 +811,9 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
         depth_filtered_identifiers=len(all_valid_ids - eligible_ids),
         invalid_depth_rows=invalid_depth_rows,
         depth_filter_description=depth_filter.description if depth_filter else "",
+        unavailable_network_shares=sum(not available for available, _ in
+                                       available_roots.values()),
+        network_paths_skipped=len(unavailable_paths),
     )
     return ImportResult(
         table, ordered_paths, path_identifiers, path_locations, loaded_ids, audit, stats

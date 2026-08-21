@@ -177,6 +177,9 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    controls whether blank depths remain eligible. Values equal to the threshold,
    nonnumeric nonblank values, and blank values when unchecked are excluded and
    identified explicitly in the audit.
+   Image resolution runs in a progress dialog instead of freezing the main
+   window. Distinct TIFF candidates are checked in parallel. **Cancel** closes
+   the dialog without changing the open review or saved subset.
 7. **When the sweep is complete**, compare it against the detector's
    `stamp_inventory.csv` (join its `api14` to `log_api`) and promote as described in
    [Outputs](#outputs).
@@ -233,6 +236,11 @@ back to their prior state.
   12-digit identifier also tries the standard trailing-`00` filename form.
 - **`IHS ASSOC IMAGE` is a placeholder, not a path.** It is marked covered when
   another TIFF loads for the same identifier and unresolved otherwise.
+- **UNC shares receive one bounded preflight.** Before individual network TIFFs
+  are opened, LogReview checks each `\\server\share` root once, waiting at most
+  four seconds. An unavailable or nonresponsive share is skipped as a group
+  instead of blocking once per listed TIFF; affected rows receive an explicit
+  `network_unavailable` audit status.
 - **Location fields are source metadata.** When a manifest maps latitude and/or
   longitude, the first nonblank value for each eligible identifier is copied to
   every loaded TIFF row for that identifier. The source file remains unchanged.
@@ -322,7 +330,8 @@ near-instant afterward.
   plus its identifier/path resolution, loaded flags, status, source, and detail.
   Its summary reports folder loads, listed-path recoveries, duplicates,
   partial/unrecovered identifiers, covered/unresolved placeholders, and any
-  depth-filter exclusions.
+  depth-filter exclusions. It also reports unavailable network shares and the
+  number of network paths skipped by preflight.
 - Bundled `log_types.json` — fixed choices maintained with the application.
 - `cache/<source-id>/<revision>/...` — disposable grayscale pyramid tiles and
   source identity metadata. Delete them at any time to force regeneration.
@@ -355,6 +364,10 @@ that in the ledger with the version and date.
 - **Original TIFFs are immutable inputs.** The viewer never builds internal TIFF
   overviews and never writes `.ovr` sidecars beside the images; all derivatives
   live under the application's `cache/` directory.
+- **Network recovery still depends on Windows access.** A share that does not
+  answer the four-second preflight is treated as unavailable for that import.
+  Reconnect to the network/VPN and run the import again rather than waiting on a
+  frozen window. Cancelling a load never changes the current review state.
 - **"Whole page" is a locator, not a reading.** At 1:660 a 44-ft log is an 8-px
   strip; use it to find where the ink is, then zoom. Judging a stamp needs at
   least ~1:8 (a 1.4 in stamp is then ~70 px).

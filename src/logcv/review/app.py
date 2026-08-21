@@ -46,8 +46,10 @@ from . import pages
 from .imports import (
     ColumnSelectionRequired,
     DepthFilter,
+    ImportCancelled,
     ImportResult,
     ManifestError,
+    SourceTable,
     audit_report_path,
     load_manifest,
     resolve_manifest,
@@ -814,6 +816,110 @@ class ReviewApp(tk.Tk):
         accepted, depth_filter = self._ask_depth_filter(table)
         return (table, depth_filter) if accepted else None
 
+    def _resolve_manifest_interactive(
+        self, table, folder_images: list[str], depth_filter: DepthFilter | None
+    ) -> ImportResult | None:
+        """Resolve images off the Tk thread with visible progress and cancellation."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Loading image list")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        status_var = tk.StringVar(
+            value=f"Preparing {len(table.rows):,} manifest row(s)…"
+        )
+        ttk.Label(
+            body, textvariable=status_var, justify="left", wraplength=600,
+        ).pack(anchor="w", fill="x", pady=(0, 12))
+        progress = ttk.Progressbar(body, mode="determinate", length=540, maximum=1)
+        progress.pack(fill="x")
+        ttk.Label(
+            body,
+            text="Network TIFFs are checked in parallel. You can cancel without "
+                 "changing the current review.",
+            justify="left", wraplength=600,
+        ).pack(anchor="w", pady=(10, 0))
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(16, 0))
+        cancel_event = threading.Event()
+        messages: "queue.Queue" = queue.Queue()
+        state: dict[str, object] = {
+            "result": None, "error": None, "cancelled": False,
+        }
+
+        def report(done: int, total: int, detail: str) -> None:
+            messages.put(("progress", done, total, detail))
+
+        def work() -> None:
+            try:
+                value = resolve_manifest(
+                    table, folder_images, depth_filter=depth_filter,
+                    progress_fn=report, cancel_event=cancel_event,
+                )
+            except ImportCancelled:
+                messages.put(("cancelled",))
+            except Exception as exc:
+                messages.put(("error", exc))
+            else:
+                messages.put(("done", value))
+
+        def cancel() -> None:
+            state["cancelled"] = True
+            cancel_event.set()
+            if dialog.winfo_exists():
+                dialog.destroy()
+
+        def poll() -> None:
+            if not dialog.winfo_exists():
+                return
+            try:
+                while True:
+                    message = messages.get_nowait()
+                    kind = message[0]
+                    if kind == "progress":
+                        _, done, total, detail = message
+                        progress.configure(maximum=max(1, total))
+                        progress["value"] = done
+                        if done:
+                            status_var.set(
+                                f"Checking TIFF {done:,} of {total:,}: {detail}"
+                            )
+                        else:
+                            status_var.set(str(detail))
+                    elif kind == "done":
+                        state["result"] = message[1]
+                        dialog.destroy()
+                        return
+                    elif kind == "error":
+                        state["error"] = message[1]
+                        dialog.destroy()
+                        return
+                    elif kind == "cancelled":
+                        state["cancelled"] = True
+                        dialog.destroy()
+                        return
+            except queue.Empty:
+                pass
+            dialog.after(60, poll)
+
+        ttk.Button(buttons, text="Cancel", command=cancel).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.grab_set()
+        dialog.update_idletasks()
+        thread = threading.Thread(
+            target=work, daemon=True, name="logreview-manifest-resolution"
+        )
+        thread.start()
+        dialog.after(60, poll)
+        self.wait_window(dialog)
+        if state["error"] is not None and not state["cancelled"]:
+            messagebox.showerror(
+                "Cannot load image list", str(state["error"]), parent=self
+            )
+        return state["result"] if isinstance(state["result"], ImportResult) else None
+
     def _pick_image_list(self) -> bool:
         source = filedialog.askopenfilename(
             title="Select an image list or manifest",
@@ -842,12 +948,11 @@ class ReviewApp(tk.Tk):
             except OSError as exc:
                 messagebox.showerror("Cannot read folder", str(exc), parent=self)
                 return False
-        self.configure(cursor="watch")
-        self.update_idletasks()
-        try:
-            result = resolve_manifest(table, folder_images, depth_filter=depth_filter)
-        finally:
-            self.configure(cursor="")
+        result = self._resolve_manifest_interactive(
+            table, folder_images, depth_filter
+        )
+        if result is None:
+            return False
         if not result.paths:
             report = audit_report_path(source, os.path.join(_default_reviews_dir(),
                                                              "review.xlsx"))
@@ -1362,14 +1467,11 @@ class ReviewApp(tk.Tk):
         if loaded is None:
             return
         table, depth_filter = loaded
-        self.configure(cursor="watch")
-        self.update_idletasks()
-        try:
-            result = resolve_manifest(
-                table, self.all_paths, depth_filter=depth_filter
-            )
-        finally:
-            self.configure(cursor="")
+        result = self._resolve_manifest_interactive(
+            table, list(self.all_paths), depth_filter
+        )
+        if result is None:
+            return
         if not result.paths:
             report = audit_report_path(source, self.store.path)
             try:
@@ -2684,6 +2786,27 @@ def selftest(folder: str | None = None) -> int:
                   f"{app._photo.width()}x{app._photo.height()}" if app._photo else "no bitmap")
             check("reviewer displayed", app.reviewer_var.get() == "SELFTEST")
             check("update control available", app.update_button.winfo_exists() == 1)
+            from collections import OrderedDict
+            manifest_table = SourceTable(
+                source_path=os.path.join(tmp, "selftest_manifest.csv"),
+                headers=("API", "TIFPATH"),
+                rows=(OrderedDict([
+                    ("API", "1"),
+                    ("TIFPATH", os.path.abspath(app.current_path or "")),
+                ]),),
+                identifier_column="API",
+                path_column="TIFPATH",
+            )
+            manifest_result = app._resolve_manifest_interactive(
+                manifest_table, [], None
+            )
+            check(
+                "manifest progress dialog resolves a local TIFF",
+                manifest_result is not None and manifest_result.stats.loaded_tiffs == 1,
+                ("no result" if manifest_result is None else
+                 f"{manifest_result.stats.loaded_tiffs} loaded / "
+                 f"{manifest_result.audit_rows[0].load_status}"),
+            )
             update_choices = []
             original_choice = app._choice_dialog
             try:

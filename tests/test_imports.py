@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 import os
+import threading
+import time
 from collections import OrderedDict
 
 import pytest
@@ -11,6 +13,7 @@ from openpyxl import Workbook
 from logcv.review.imports import (
     ColumnSelectionRequired,
     DepthFilter,
+    ImportCancelled,
     audit_report_path,
     load_manifest,
     normalize_identifier,
@@ -134,6 +137,78 @@ def test_resolution_prefers_folder_then_recovers_external_and_loads_all_tiffs(tm
         "loaded_from_selected_folder", "recovered_from_listed_path",
         "loaded_from_selected_folder", "placeholder_covered",
     ]
+
+
+def test_distinct_candidates_are_probed_concurrently_but_results_keep_source_order(
+    tmp_path,
+):
+    source = tmp_path / "parallel.csv"
+    paths = [_touch(tmp_path / f"{value}.tif") for value in range(1, 9)]
+    with source.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["API", "TIFPATH"])
+        for value, path in enumerate(paths, start=1):
+            writer.writerow([value, path])
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def slow_probe(path):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.03)
+            return os.path.getsize(path)
+        finally:
+            with lock:
+                active -= 1
+
+    progress = []
+    result = resolve_manifest(
+        load_manifest(str(source)), probe_fn=slow_probe, max_workers=4,
+        progress_fn=lambda done, total, name: progress.append((done, total, name)),
+    )
+    assert maximum_active >= 2
+    assert result.paths == [os.path.abspath(path) for path in paths]
+    assert progress[-1][:2] == (8, 8)
+
+
+def test_unavailable_unc_share_is_checked_once_and_paths_are_not_probed(tmp_path):
+    source = tmp_path / "network.csv"
+    source.write_text(
+        "API,TIFPATH\n1,\\\\server\\share\\1.tif\n"
+        "2,\\\\server\\share\\2.tif\n",
+        encoding="utf-8",
+    )
+    checked_roots = []
+    probed_paths = []
+    result = resolve_manifest(
+        load_manifest(str(source)),
+        probe_fn=lambda path: probed_paths.append(path),
+        network_check=lambda root: checked_roots.append(root) or False,
+    )
+    assert checked_roots == [r"\\server\share"]
+    assert probed_paths == []
+    assert [row.load_status for row in result.audit_rows] == [
+        "network_unavailable_unresolved", "network_unavailable_unresolved",
+    ]
+    assert result.stats.unavailable_network_shares == 1
+    assert result.stats.network_paths_skipped == 2
+
+
+def test_cancelled_resolution_stops_before_probing(tmp_path):
+    tif = _touch(tmp_path / "1.tif")
+    source = tmp_path / "cancel.csv"
+    source.write_text(f"API,TIFPATH\n1,{tif}\n", encoding="utf-8")
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(ImportCancelled):
+        resolve_manifest(
+            load_manifest(str(source)), probe_fn=lambda _path: pytest.fail(),
+            cancel_event=cancelled,
+        )
 
 
 def test_depth_filter_is_strict_and_can_include_or_exclude_blanks(tmp_path):
@@ -280,3 +355,15 @@ def test_supplied_raster_summary_shape_is_stable():
     assert lengths.count(12) == 19
     assert lengths.count(14) == 384
     assert placeholders == 460
+
+    # Exercise candidate construction without touching any listed network path.
+    # The injected share check rejects the one UNC root before per-file probing.
+    dry_result = resolve_manifest(
+        table,
+        probe_fn=lambda path: pytest.fail(f"unexpected path probe: {path}"),
+        network_check=lambda _root: False,
+    )
+    assert dry_result.stats.unique_tiff_candidates == 943
+    assert dry_result.stats.unavailable_network_shares == 1
+    assert dry_result.stats.network_paths_skipped == 952
+    assert dry_result.stats.loaded_tiffs == 0
