@@ -466,6 +466,32 @@ def test_detected_blank_location_columns_remain_in_workbook(tmp_path):
     assert header == [*COLUMNS, "latitude", "longitude"]
 
 
+def test_manifest_log_intervals_round_trip_in_review_and_subset(tmp_path):
+    from openpyxl import load_workbook
+
+    book = tmp_path / "review.xlsx"
+    store = ReviewStore(str(book))
+    store.location_columns = ["log_top_depth", "log_bottom_depth"]
+    store.record_for(
+        str(tmp_path / "21441_GR.tif"), "21441",
+        log_top_depth="100", log_bottom_depth="925",
+    )
+    store.replace_subset(["21441"])
+    store.save(["21441_GR.tif"])
+
+    workbook = load_workbook(book, data_only=True)
+    expected = [*COLUMNS, "log_top_depth", "log_bottom_depth"]
+    assert [cell.value for cell in workbook["review"][1]] == expected
+    assert [cell.value for cell in workbook[SUBSET_SHEET][1]] == expected
+    workbook.close()
+
+    validate_review_workbook(str(book), {"21441_GR.tif"})
+    loaded = ReviewStore(str(book))
+    loaded.load()
+    assert loaded.records["21441_GR.tif"].log_top_depth == "100"
+    assert loaded.records["21441_GR.tif"].log_bottom_depth == "925"
+
+
 def test_remove_records_supports_reconciliation_rollback(tmp_path):
     store = ReviewStore(str(tmp_path / "review.xlsx"))
     store.record_for("C:/a.tif")

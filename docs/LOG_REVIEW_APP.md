@@ -58,7 +58,10 @@ Reviewer:         KP [Change]                         saved 15:04:22 - 23 entrie
 ```
 
 The viewer controls include **Show TIFF in Explorer**, which opens Windows
-Explorer with the unmodified source image highlighted.
+Explorer with the unmodified source image highlighted. The log list is
+horizontally scrollable, each header boundary can be dragged to resize that
+column, and the divider between the list and image viewer can be dragged left or
+right.
 
 `--selftest` drives the whole app once without a human — opens a page, renders
 it, records a verdict, writes and re-reads the workbook — and exits 0 if healthy.
@@ -136,10 +139,11 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
 - An optional TXT, CSV, TSV, or XLSX image list for startup or **Evaluate a
   subset**. Headerless TXT files contain one identifier per nonblank line.
   Structured files contain a numeric identifier column and may contain a TIFF
-  path, latitude, longitude, and depth column. Common `API`/`UWI`/`WELL_ID`,
+  path, latitude, longitude, filter depth, and log-interval columns. Common `API`/`UWI`/`WELL_ID`,
   `TIFPATH`/`FILE_PATH`/`IMAGE_PATH`, `LAT`/`LATITUDE`, `LONG`/`LONGITUDE`, and
-  `DEPTH1`/`WELL_DEPTH` headers are detected case-insensitively; ambiguous files
-  prompt for an explicit column mapping.
+  `DEPTH1`/`DEPTH2`/`WELL_DEPTH` headers are detected case-insensitively;
+  `DEPTH1` is treated as the log top and `DEPTH2` as the log bottom. Ambiguous
+  files prompt for an explicit column mapping.
 
 ## Steps
 
@@ -160,10 +164,13 @@ to `reviews\<folder name>_stamp_review.xlsx` beside the executable.
    enabled only after a valid change. The app writes Excel and advances to the
    next incomplete page. Navigating away from a draft offers Save, Discard, or
    Cancel; `Ctrl+S` saves a draft without advancing.
-5. **Track progress** in the list: a green `✔` marks a reviewed log, an amber `⚠`
+5. **Track progress** in the list: its **Log top** and **Log bottom** columns show
+   the available interval supplied for each TIFF. A green `✔` marks a reviewed log, an amber `⚠`
    a committed partial entry, and the toolbar counts
    `reviewed / total` and how many carry a stamp. The `show:` filter narrows the
-   list to *to do* or *done*.
+   list to *to do* or *done*. Drag a column-header boundary to resize it, use the
+   bottom scrollbar to reach wide columns, or drag the list/viewer divider to
+   allocate more space to either section.
 6. **Optionally evaluate a subset.** Click **Evaluate a subset…**, select a TXT,
    CSV, TSV, or XLSX file, review the load summary, and create or replace the
    workbook's `subset` sheet. Use **whole dataset** and **subset** above the log
@@ -244,6 +251,11 @@ back to their prior state.
 - **Location fields are source metadata.** When a manifest maps latitude and/or
   longitude, the first nonblank value for each eligible identifier is copied to
   every loaded TIFF row for that identifier. The source file remains unchanged.
+- **Log intervals are source metadata.** When a manifest maps a log top and/or
+  bottom, values from a row naming a particular TIFF are attached to that TIFF.
+  A folder-only match falls back to the first nonblank interval for its
+  identifier. Values are preserved as source text; LogReview does not infer,
+  convert, or validate interval units.
 - **Depth comparisons are strict and assume feet.** `< 200` excludes a depth of
   exactly 200; `> 200` also excludes exactly 200. Invalid nonblank depths never
   pass a numeric filter and are counted separately from blank depths.
@@ -313,11 +325,13 @@ near-instant afterward.
   | `file_path` | the same target as plain text (hyperlinks are invisible to pandas) |
   | `latitude` | optional source latitude, appended when a manifest maps that field |
   | `longitude` | optional source longitude, appended when a manifest maps that field |
+  | `log_top_depth` | optional top of the source interval available in this TIFF |
+  | `log_bottom_depth` | optional bottom of the source interval available in this TIFF |
 
   Header is frozen and auto-filtered. The sheet is **rewritten in full on every
   save**, so the file on disk is always the complete current answer.
 - Optional sheet `subset` uses the exact same columns as `review` (the nine base
-  columns plus any appended location columns) and contains
+  columns plus any appended source-metadata columns) and contains
   one complete row for every selected TIFF. It is a synchronized mirror: both
   viewer scopes edit the canonical records in `review`, and every successful save
   regenerates the subset rows with current verdicts, stamp types, log types, notes,

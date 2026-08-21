@@ -41,7 +41,9 @@ COLUMNS = [
     "file_path",      # same target as file_link, readable by pandas
 ]
 SUBSET_COLUMNS = list(COLUMNS)
-LOCATION_COLUMNS = ["latitude", "longitude"]
+LOCATION_COLUMNS = [
+    "latitude", "longitude", "log_top_depth", "log_bottom_depth",
+]
 LEGACY_SUBSET_COLUMNS = ["position", "log_api"]
 #: Required in all supported schemas. ``api14`` is accepted as the legacy alias
 #: for ``log_api``; ``log_types`` and ``reviewed_by`` were added later.
@@ -138,6 +140,8 @@ class Record:
     reviewed_by: str = ""
     latitude: str = ""
     longitude: str = ""
+    log_top_depth: str = ""
+    log_bottom_depth: str = ""
 
     @property
     def reviewed(self) -> bool:
@@ -426,6 +430,12 @@ class ReviewStore:
                 reviewed_by=str(getattr(cell(row, "reviewed_by"), "value", "") or "").strip(),
                 latitude=str(getattr(cell(row, "latitude"), "value", "") or "").strip(),
                 longitude=str(getattr(cell(row, "longitude"), "value", "") or "").strip(),
+                log_top_depth=str(
+                    getattr(cell(row, "log_top_depth"), "value", "") or ""
+                ).strip(),
+                log_bottom_depth=str(
+                    getattr(cell(row, "log_bottom_depth"), "value", "") or ""
+                ).strip(),
             )
             self.records[name] = record
             found += 1
@@ -438,7 +448,8 @@ class ReviewStore:
     # ----------------------------------------------------------------- rows
 
     def record_for(self, path: str, api14: str = "", latitude: str = "",
-                   longitude: str = "") -> Record:
+                   longitude: str = "", log_top_depth: str = "",
+                   log_bottom_depth: str = "") -> Record:
         """The record for ``path``, created blank the first time it is asked for."""
         name = os.path.basename(path)
         record = self.records.get(name)
@@ -453,6 +464,8 @@ class ReviewStore:
                 file_name=name, file_path=os.path.abspath(path), api14=api14,
                 latitude=str(latitude or "").strip(),
                 longitude=str(longitude or "").strip(),
+                log_top_depth=str(log_top_depth or "").strip(),
+                log_bottom_depth=str(log_bottom_depth or "").strip(),
             )
             self.records[name] = record
         else:
@@ -464,6 +477,10 @@ class ReviewStore:
                 record.latitude = str(latitude).strip()
             if longitude:
                 record.longitude = str(longitude).strip()
+            if log_top_depth:
+                record.log_top_depth = str(log_top_depth).strip()
+            if log_bottom_depth:
+                record.log_bottom_depth = str(log_bottom_depth).strip()
         return record
 
     def stamp_types_in_use(self) -> list[str]:
@@ -574,7 +591,12 @@ class ReviewStore:
             or any(getattr(record, name) for record in self.records.values())
         ]
         output_columns = [*COLUMNS, *optional_columns]
-        widths = [16, 46, 11, 24, 28, 40, 20, 16, 70, 14, 14]
+        widths = [16, 46, 11, 24, 28, 40, 20, 16, 70]
+        metadata_widths = {
+            "latitude": 14, "longitude": 14,
+            "log_top_depth": 16, "log_bottom_depth": 18,
+        }
+        widths.extend(metadata_widths[name] for name in optional_columns)
 
         def write_record_sheet(target, record_names: list[str]) -> None:
             for col, column_name in enumerate(output_columns, start=1):

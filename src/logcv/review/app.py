@@ -362,9 +362,11 @@ class ReviewApp(tk.Tk):
         ttk.Label(actions, textvariable=self.saved_var, foreground="#555", width=26,
                   anchor="e").pack(side="left", padx=(8, 0))
 
-        # --- list ------------------------------------------------------------
-        left = ttk.Frame(self, padding=(8, 0, 4, 0))
-        left.grid(row=1, column=0, sticky="nsew")
+        # --- resizable list / viewer split ----------------------------------
+        self.main_pane = ttk.Panedwindow(self, orient="horizontal")
+        self.main_pane.grid(row=1, column=0, columnspan=2, sticky="nsew")
+
+        left = ttk.Frame(self.main_pane, padding=(8, 0, 4, 0))
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
@@ -396,16 +398,20 @@ class ReviewApp(tk.Tk):
             filter_row, text="Evaluate a subset…", command=self._evaluate_subset
         ).pack(side="left", padx=(8, 0))
 
-        columns = ("rev", "file", "stamp", "type", "notes")
+        columns = ("rev", "file", "top", "bottom", "stamp", "type", "notes")
         self.tree = ttk.Treeview(left, columns=columns, show="headings",
                                  selectmode="browse", height=30)
         self.tree.heading("rev", text="Reviewed")
         self.tree.heading("file", text="Log file")
+        self.tree.heading("top", text="Log top")
+        self.tree.heading("bottom", text="Log bottom")
         self.tree.heading("stamp", text="Stamp")
         self.tree.heading("type", text="Type")
         self.tree.heading("notes", text="Note")
         self.tree.column("rev", width=70, anchor="center", stretch=False)
-        self.tree.column("file", width=290, anchor="w")
+        self.tree.column("file", width=290, anchor="w", stretch=False)
+        self.tree.column("top", width=85, anchor="e", stretch=False)
+        self.tree.column("bottom", width=90, anchor="e", stretch=False)
         self.tree.column("stamp", width=60, anchor="center", stretch=False)
         self.tree.column("type", width=90, anchor="w", stretch=False)
         self.tree.column("notes", width=220, anchor="w", stretch=False)
@@ -422,10 +428,12 @@ class ReviewApp(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         # --- viewer ----------------------------------------------------------
-        right = ttk.Frame(self, padding=(4, 0, 8, 0))
-        right.grid(row=1, column=1, sticky="nsew")
+        right = ttk.Frame(self.main_pane, padding=(4, 0, 8, 0))
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
+        self.main_pane.add(left, weight=1)
+        self.main_pane.add(right, weight=3)
+        self.after(100, self._set_initial_split)
 
         self.canvas = tk.Canvas(right, bg="#5a5f66", highlightthickness=1,
                                 highlightbackground="#333", cursor="fleur")
@@ -591,6 +599,15 @@ class ReviewApp(tk.Tk):
         ttk.Button(choices, text="Open image list…", command=self._pick_image_list
                    ).pack(side="left", padx=(8, 0))
 
+    def _set_initial_split(self) -> None:
+        """Give the list a useful starting width without fixing it in place."""
+        try:
+            available = self.main_pane.winfo_width()
+            if available > 1:
+                self.main_pane.sashpos(0, max(460, min(720, available // 2)))
+        except tk.TclError:  # window may be closing during delayed startup
+            pass
+
     def _bind_keys(self) -> None:
         self.bind_all("<Key>", self._on_key)
         self.bind_all("<Control-s>", lambda e: (self.save(), "break")[1])
@@ -662,7 +679,7 @@ class ReviewApp(tk.Tk):
         ttk.Label(
             body,
             text="Choose the API/well identifier and any optional TIFF path, "
-                 "location, and depth columns.",
+                 "location, filter-depth, and log-interval columns.",
             justify="left", wraplength=560,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
         ttk.Label(body, text="Identifier column:").grid(row=1, column=0, sticky="w")
@@ -677,7 +694,11 @@ class ReviewApp(tk.Tk):
             ("TIFF-path column:", "path", required.path_candidates),
             ("Latitude column:", "latitude", required.latitude_candidates),
             ("Longitude column:", "longitude", required.longitude_candidates),
-            ("Depth column:", "depth", required.depth_candidates),
+            ("Filter depth column:", "depth", required.depth_candidates),
+            ("Log top depth column:", "log_top_depth",
+             required.log_top_depth_candidates),
+            ("Log bottom depth column:", "log_bottom_depth",
+             required.log_bottom_depth_candidates),
         ]
         none_label = "(none)"
         for row_index, (label, key, candidates) in enumerate(optional_specs, start=2):
@@ -692,7 +713,10 @@ class ReviewApp(tk.Tk):
                 state="readonly", width=38,
             ).grid(row=row_index, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
         buttons = ttk.Frame(body)
-        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        buttons.grid(
+            row=len(optional_specs) + 2, column=0, columnspan=2,
+            sticky="e", pady=(18, 0),
+        )
 
         def accept() -> None:
             if not id_var.get():
@@ -701,11 +725,29 @@ class ReviewApp(tk.Tk):
                 return
             try:
                 result["table"] = select_columns(
-                    required.table, id_var.get(),
-                    *(
-                        None if optional_boxes[key].get() == none_label
-                        else optional_boxes[key].get()
-                        for key in ("path", "latitude", "longitude", "depth")
+                    required.table,
+                    identifier_column=id_var.get(),
+                    path_column=(None if optional_boxes["path"].get() == none_label
+                                 else optional_boxes["path"].get()),
+                    latitude_column=(
+                        None if optional_boxes["latitude"].get() == none_label
+                        else optional_boxes["latitude"].get()
+                    ),
+                    longitude_column=(
+                        None if optional_boxes["longitude"].get() == none_label
+                        else optional_boxes["longitude"].get()
+                    ),
+                    depth_column=(
+                        None if optional_boxes["depth"].get() == none_label
+                        else optional_boxes["depth"].get()
+                    ),
+                    log_top_depth_column=(
+                        None if optional_boxes["log_top_depth"].get() == none_label
+                        else optional_boxes["log_top_depth"].get()
+                    ),
+                    log_bottom_depth_column=(
+                        None if optional_boxes["log_bottom_depth"].get() == none_label
+                        else optional_boxes["log_bottom_depth"].get()
                     ),
                 )
             except ManifestError as exc:
@@ -1253,6 +1295,8 @@ class ReviewApp(tk.Tk):
                 name for name, selected in (
                     ("latitude", result.source.latitude_column),
                     ("longitude", result.source.longitude_column),
+                    ("log_top_depth", result.source.log_top_depth_column),
+                    ("log_bottom_depth", result.source.log_bottom_depth_column),
                 ) if selected
             ],
         ):
@@ -1334,8 +1378,11 @@ class ReviewApp(tk.Tk):
             log_id = identifiers.get(key) or pages.api14_from_name(path)
             location = self._path_locations.get(key, {})
             record = self.store.record_for(
-                path, log_id, location.get("latitude", ""),
-                location.get("longitude", ""),
+                path, log_id,
+                latitude=location.get("latitude", ""),
+                longitude=location.get("longitude", ""),
+                log_top_depth=location.get("log_top_depth", ""),
+                log_bottom_depth=location.get("log_bottom_depth", ""),
             )
             if identifiers.get(key):
                 record.api14 = log_id
@@ -1503,12 +1550,17 @@ class ReviewApp(tk.Tk):
         old_locations = dict(self._path_locations)
         old_location_columns = list(self.store.location_columns)
         old_record_values = {
-            name: (record.api14, record.latitude, record.longitude)
+            name: (
+                record.api14, record.latitude, record.longitude,
+                record.log_top_depth, record.log_bottom_depth,
+            )
             for name, record in self.store.records.items()
         }
         for name, selected in (
             ("latitude", result.source.latitude_column),
             ("longitude", result.source.longitude_column),
+            ("log_top_depth", result.source.log_top_depth_column),
+            ("log_bottom_depth", result.source.log_bottom_depth_column),
         ):
             if selected and name not in self.store.location_columns:
                 self.store.location_columns.append(name)
@@ -1523,8 +1575,11 @@ class ReviewApp(tk.Tk):
                 self.all_paths.append(path)
                 existing_keys.add(key)
             record = self.store.record_for(
-                path, identifier, location.get("latitude", ""),
-                location.get("longitude", ""),
+                path, identifier,
+                latitude=location.get("latitude", ""),
+                longitude=location.get("longitude", ""),
+                log_top_depth=location.get("log_top_depth", ""),
+                log_bottom_depth=location.get("log_bottom_depth", ""),
             )
             record.api14 = identifier
         self.store.replace_subset(result.loaded_identifiers)
@@ -1539,10 +1594,13 @@ class ReviewApp(tk.Tk):
                 if name not in old_record_values:
                     self.store.records.pop(name)
                 else:
-                    api, latitude, longitude = old_record_values[name]
+                    (api, latitude, longitude, log_top_depth,
+                     log_bottom_depth) = old_record_values[name]
                     self.store.records[name].api14 = api
                     self.store.records[name].latitude = latitude
                     self.store.records[name].longitude = longitude
+                    self.store.records[name].log_top_depth = log_top_depth
+                    self.store.records[name].log_bottom_depth = log_bottom_depth
             self._refresh_scope_controls()
             return
         report = audit_report_path(source, self.store.path)
@@ -1590,11 +1648,19 @@ class ReviewApp(tk.Tk):
 
     def _row_values(self, i: int) -> tuple:
         record = self.store.records.get(os.path.basename(self.paths[i]))
-        if record is None or not record.has_entry:
-            return ("", os.path.basename(self.paths[i]), "", "", "")
+        if record is None:
+            return ("", os.path.basename(self.paths[i]), "", "", "", "", "")
+        if not record.has_entry:
+            return (
+                "", record.file_name, record.log_top_depth,
+                record.log_bottom_depth, "", "", "",
+            )
         mark = WARN if record.incomplete else CHECK
         stamp = "" if record.has_stamp is None else ("yes" if record.has_stamp else "no")
-        return (mark, record.file_name, stamp, record.stamp_type, record.notes)
+        return (
+            mark, record.file_name, record.log_top_depth,
+            record.log_bottom_depth, stamp, record.stamp_type, record.notes,
+        )
 
     def _row_tag(self, i: int) -> str:
         record = self.store.records.get(os.path.basename(self.paths[i]))
@@ -2778,6 +2844,19 @@ def selftest(folder: str | None = None) -> int:
             )
             check("folder listed", bool(app.paths), f"{len(app.paths)} images")
             check("notes column visible", "notes" in app.tree["columns"])
+            check(
+                "log interval columns visible",
+                all(name in app.tree["columns"] for name in ("top", "bottom")),
+            )
+            check(
+                "list and viewer have a draggable split",
+                len(app.main_pane.panes()) == 2,
+            )
+            check(
+                "list columns remain horizontally scrollable",
+                all(not bool(app.tree.column(name, "stretch"))
+                    for name in app.tree["columns"]),
+            )
             check("stamp types can be managed",
                   app.manage_stamp_types_button.winfo_exists() == 1)
             check("page opened", app.current_path is not None,

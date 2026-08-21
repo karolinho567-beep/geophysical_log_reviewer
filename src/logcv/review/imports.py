@@ -40,6 +40,18 @@ DEPTH_ALIASES = {
     "depth", "depth1", "depth_1", "welldepth", "well_depth", "totaldepth",
     "total_depth", "depthft", "depth_ft", "depthfeet", "depth_feet",
 }
+LOG_TOP_DEPTH_ALIASES = {
+    "depth1", "depth_1", "logtop", "log_top", "logtopdepth",
+    "log_top_depth", "topdepth", "top_depth", "startdepth", "start_depth",
+    "intervaltop", "interval_top", "fromdepth", "from_depth", "depthfrom",
+    "depth_from", "availablefrom", "available_from",
+}
+LOG_BOTTOM_DEPTH_ALIASES = {
+    "depth2", "depth_2", "logbottom", "log_bottom", "logbottomdepth",
+    "log_bottom_depth", "bottomdepth", "bottom_depth", "enddepth", "end_depth",
+    "intervalbottom", "interval_bottom", "todepth", "to_depth", "depthto",
+    "depth_to", "availableto", "available_to",
+}
 PLACEHOLDERS = {"ihs assoc image"}
 AUDIT_COLUMNS = [
     "import_row", "source_identifier", "match_identifier", "source_tif_path",
@@ -61,7 +73,9 @@ class ColumnSelectionRequired(ManifestError):
 
     def __init__(self, table: "SourceTable", id_candidates: list[str],
                  path_candidates: list[str], latitude_candidates: list[str],
-                 longitude_candidates: list[str], depth_candidates: list[str]):
+                 longitude_candidates: list[str], depth_candidates: list[str],
+                 log_top_depth_candidates: list[str],
+                 log_bottom_depth_candidates: list[str]):
         super().__init__("Select the identifier and optional TIFF-path columns.")
         self.table = table
         self.id_candidates = id_candidates
@@ -69,6 +83,8 @@ class ColumnSelectionRequired(ManifestError):
         self.latitude_candidates = latitude_candidates
         self.longitude_candidates = longitude_candidates
         self.depth_candidates = depth_candidates
+        self.log_top_depth_candidates = log_top_depth_candidates
+        self.log_bottom_depth_candidates = log_bottom_depth_candidates
 
 
 @dataclass(frozen=True)
@@ -81,6 +97,8 @@ class SourceTable:
     latitude_column: str | None = None
     longitude_column: str | None = None
     depth_column: str | None = None
+    log_top_depth_column: str | None = None
+    log_bottom_depth_column: str | None = None
 
     @property
     def has_paths(self) -> bool:
@@ -227,6 +245,8 @@ _PATH_KEYS = _alias_keys(PATH_ALIASES)
 _LAT_KEYS = _alias_keys(LATITUDE_ALIASES)
 _LONG_KEYS = _alias_keys(LONGITUDE_ALIASES)
 _DEPTH_KEYS = _alias_keys(DEPTH_ALIASES)
+_LOG_TOP_DEPTH_KEYS = _alias_keys(LOG_TOP_DEPTH_ALIASES)
+_LOG_BOTTOM_DEPTH_KEYS = _alias_keys(LOG_BOTTOM_DEPTH_ALIASES)
 
 
 def _cell_text(value) -> str:
@@ -337,7 +357,9 @@ def select_columns(table: SourceTable, identifier_column: str | None = None,
                    path_column: str | None = None,
                    latitude_column: str | None = None,
                    longitude_column: str | None = None,
-                   depth_column: str | None = None) -> SourceTable:
+                   depth_column: str | None = None,
+                   log_top_depth_column: str | None = None,
+                   log_bottom_depth_column: str | None = None) -> SourceTable:
     """Attach selected columns, auto-detecting unambiguous aliases."""
     headers = list(table.headers)
     id_candidates = [h for h in headers if _header_key(h) in _ID_KEYS]
@@ -345,6 +367,12 @@ def select_columns(table: SourceTable, identifier_column: str | None = None,
     latitude_candidates = [h for h in headers if _header_key(h) in _LAT_KEYS]
     longitude_candidates = [h for h in headers if _header_key(h) in _LONG_KEYS]
     depth_candidates = [h for h in headers if _header_key(h) in _DEPTH_KEYS]
+    log_top_depth_candidates = [
+        h for h in headers if _header_key(h) in _LOG_TOP_DEPTH_KEYS
+    ]
+    log_bottom_depth_candidates = [
+        h for h in headers if _header_key(h) in _LOG_BOTTOM_DEPTH_KEYS
+    ]
     if identifier_column is None:
         if table.identifier_column:
             identifier_column = table.identifier_column
@@ -358,34 +386,52 @@ def select_columns(table: SourceTable, identifier_column: str | None = None,
         longitude_column = longitude_candidates[0]
     if depth_column is None and len(depth_candidates) == 1:
         depth_column = depth_candidates[0]
+    if log_top_depth_column is None and len(log_top_depth_candidates) == 1:
+        log_top_depth_column = log_top_depth_candidates[0]
+    if log_bottom_depth_column is None and len(log_bottom_depth_candidates) == 1:
+        log_bottom_depth_column = log_bottom_depth_candidates[0]
     needs_id = identifier_column not in headers
     ambiguous_path = len(path_candidates) > 1 and path_column not in headers
     ambiguous_lat = len(latitude_candidates) > 1 and latitude_column not in headers
     ambiguous_long = len(longitude_candidates) > 1 and longitude_column not in headers
     ambiguous_depth = len(depth_candidates) > 1 and depth_column not in headers
-    if needs_id or ambiguous_path or ambiguous_lat or ambiguous_long or ambiguous_depth:
+    ambiguous_log_top = (
+        len(log_top_depth_candidates) > 1 and log_top_depth_column not in headers
+    )
+    ambiguous_log_bottom = (
+        len(log_bottom_depth_candidates) > 1 and log_bottom_depth_column not in headers
+    )
+    if (needs_id or ambiguous_path or ambiguous_lat or ambiguous_long
+            or ambiguous_depth or ambiguous_log_top or ambiguous_log_bottom):
         raise ColumnSelectionRequired(
             table, id_candidates, path_candidates, latitude_candidates,
-            longitude_candidates, depth_candidates,
+            longitude_candidates, depth_candidates, log_top_depth_candidates,
+            log_bottom_depth_candidates,
         )
     for label, selected in (
         ("TIFF-path", path_column), ("latitude", latitude_column),
         ("longitude", longitude_column), ("depth", depth_column),
+        ("log top depth", log_top_depth_column),
+        ("log bottom depth", log_bottom_depth_column),
     ):
         if selected and selected not in headers:
             raise ManifestError(f"Unknown {label} column: {selected}")
     return SourceTable(table.source_path, table.headers, table.rows,
                        identifier_column, path_column, latitude_column,
-                       longitude_column, depth_column)
+                       longitude_column, depth_column, log_top_depth_column,
+                       log_bottom_depth_column)
 
 
 def load_manifest(path: str, identifier_column: str | None = None,
                   path_column: str | None = None,
                   latitude_column: str | None = None,
                   longitude_column: str | None = None,
-                  depth_column: str | None = None) -> SourceTable:
+                  depth_column: str | None = None,
+                  log_top_depth_column: str | None = None,
+                  log_bottom_depth_column: str | None = None) -> SourceTable:
     return select_columns(read_source(path), identifier_column, path_column,
-                          latitude_column, longitude_column, depth_column)
+                          latitude_column, longitude_column, depth_column,
+                          log_top_depth_column, log_bottom_depth_column)
 
 
 def normalize_identifier(value: str) -> tuple[str, tuple[str, ...]]:
@@ -756,15 +802,20 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
     loaded_ids = [identifier for identifier in valid_order if resolved_by_id.get(identifier)]
     ordered_paths: list[str] = []
     path_identifiers: dict[str, str] = {}
+    metadata_columns = tuple((name, column) for name, column in (
+        ("latitude", table.latitude_column),
+        ("longitude", table.longitude_column),
+        ("log_top_depth", table.log_top_depth_column),
+        ("log_bottom_depth", table.log_bottom_depth_column),
+    ) if column)
     identifier_locations: dict[str, dict[str, str]] = {}
     for identifier, indices in rows_by_id.items():
-        location = {"latitude": "", "longitude": ""}
+        location = {name: "" for name, _column in metadata_columns}
         for index in indices:
             original = audit[index].original
-            if table.latitude_column and not location["latitude"]:
-                location["latitude"] = original.get(table.latitude_column, "").strip()
-            if table.longitude_column and not location["longitude"]:
-                location["longitude"] = original.get(table.longitude_column, "").strip()
+            for name, column in metadata_columns:
+                if column and not location[name]:
+                    location[name] = original.get(column, "").strip()
         identifier_locations[identifier] = location
     path_locations: dict[str, dict[str, str]] = {}
     for identifier in valid_order:
@@ -772,7 +823,22 @@ def resolve_manifest(table: SourceTable, folder_images: Iterable[str] = (),
             ordered_paths.append(candidate.resolved_path)
             path_key = os.path.normcase(os.path.abspath(candidate.resolved_path))
             path_identifiers[path_key] = identifier
-            path_locations[path_key] = dict(identifier_locations.get(identifier, {}))
+            fallback = identifier_locations.get(identifier, {})
+            specific = {name: "" for name, _column in metadata_columns}
+            # When source rows identify a particular TIFF, their interval values
+            # take precedence over the identifier-level fallback. This preserves
+            # different available intervals for multiple logs from one well.
+            for index in candidate.row_indices:
+                original = audit[index].original
+                for name, column in metadata_columns:
+                    value = original.get(column, "").strip() if column else ""
+                    if value and not specific[name]:
+                        specific[name] = value
+            location = {
+                name: specific[name] or fallback.get(name, "")
+                for name, _column in metadata_columns
+            }
+            path_locations[path_key] = location
 
     # A filtered row can refer to an identifier retained by another source row.
     # Keep its audit status as filtered while still reporting whether the well loaded.

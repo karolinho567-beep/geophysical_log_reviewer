@@ -65,13 +65,37 @@ def test_csv_and_tsv_aliases_and_quoted_unc_paths_are_detected(tmp_path):
 def test_location_and_depth_columns_are_detected_case_insensitively(tmp_path):
     source = tmp_path / "wells.csv"
     source.write_text(
-        "API,TIFPATH,LAT,LONG,Depth1\n21441,a.tif,28.8,-96.9,175\n",
+        "API,TIFPATH,LAT,LONG,Depth1,Depth2\n"
+        "21441,a.tif,28.8,-96.9,175,925\n",
         encoding="utf-8",
     )
     table = load_manifest(str(source))
     assert table.latitude_column == "LAT"
     assert table.longitude_column == "LONG"
     assert table.depth_column == "Depth1"
+    assert table.log_top_depth_column == "Depth1"
+    assert table.log_bottom_depth_column == "Depth2"
+
+
+def test_log_intervals_follow_each_tiff_for_same_identifier(tmp_path):
+    first = _touch(tmp_path / "21441_GR.tif")
+    second = _touch(tmp_path / "21441_RES.tif")
+    source = tmp_path / "intervals.csv"
+    source.write_text(
+        "API,TIFPATH,DEPTH1,DEPTH2\n"
+        f"21441,{first},100,500\n"
+        f"21441,{second},450,900\n",
+        encoding="utf-8",
+    )
+    result = resolve_manifest(load_manifest(str(source)), probe_fn=_ok_probe)
+    first_key = os.path.normcase(os.path.abspath(first))
+    second_key = os.path.normcase(os.path.abspath(second))
+    assert result.path_locations[first_key] == {
+        "log_top_depth": "100", "log_bottom_depth": "500",
+    }
+    assert result.path_locations[second_key] == {
+        "log_top_depth": "450", "log_bottom_depth": "900",
+    }
 
 
 def test_xlsx_uses_first_sheet_with_identifier_columns_and_formats_numbers(tmp_path):

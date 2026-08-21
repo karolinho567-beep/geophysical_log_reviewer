@@ -5,7 +5,7 @@ geophysical logs without modifying the source images. It renders very large TIFF
 through GDAL-backed tiled pyramids and records reviewer decisions in a resumable
 Excel workbook.
 
-Current version: **1.7.4**
+Current version: **1.7.5**
 
 ## Features
 
@@ -23,6 +23,11 @@ Current version: **1.7.4**
 - Carries detected latitude/longitude fields into optional review-workbook
   columns and offers strict less-than/greater-than depth filtering with an
   explicit choice for blank depths.
+- Carries detected log-availability intervals (for example, `DEPTH1` as the
+  top and `DEPTH2` as the bottom) into the review and subset sheets and displays
+  them beside each TIFF in the log list.
+- Provides a horizontally scrollable log list with individually resizable
+  columns and a draggable divider between the list and image viewer.
 - Writes row-level import audits and load statistics, including missing images
   and covered or unresolved `IHS ASSOC IMAGE` placeholders.
 - Resolves large manifests off the GUI thread with visible progress, cancellation,
