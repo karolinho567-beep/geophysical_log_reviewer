@@ -15,4 +15,4 @@ from .io import LogImage
 from .units import Box
 
 __all__ = ["Detection", "PageResult", "LogImage", "Box"]
-__version__ = "1.7.2"
+__version__ = "1.7.3"
